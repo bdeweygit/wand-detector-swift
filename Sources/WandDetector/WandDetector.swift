@@ -3,7 +3,7 @@ import CoreVideo
 public enum WandDetectorError: Error {
     case invalidRegionOfInterest
     case invalidMaxRetainedOutputImages
-    case failedPixelBufferPoolCreation(code: CVReturn)
+    case couldNotCreatePixelBufferPool(code: CVReturn)
 }
 
 public struct WandDetector {
@@ -66,7 +66,7 @@ public struct WandDetector {
         var poolOut: CVPixelBufferPool?
         var code = CVPixelBufferPoolCreate(kCFAllocatorDefault, poolAttributes, pixelBufferAttributes, &poolOut)
         guard let pool = poolOut else {
-            throw WandDetectorError.failedPixelBufferPoolCreation(code: code)
+            throw WandDetectorError.couldNotCreatePixelBufferPool(code: code)
         }
 
         // preallocate maxRetain number of buffers
