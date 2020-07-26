@@ -47,8 +47,8 @@ public struct WandDetector {
 
             // adjust the scale so width and height will be integers
             let downscaledRegion = self.region.applying(CGAffineTransform(scaleX: downscale, y: downscale))
-            outWidth = downscaledRegion.width.rounded(.down)
-            outHeight = downscaledRegion.height.rounded(.down)
+            outWidth = downscaledRegion.width.rounded(.up)
+            outHeight = downscaledRegion.height.rounded(.up)
 
             let adjustedScaleX = outWidth / self.region.width
             let adjustedScaleY = outHeight / self.region.height
