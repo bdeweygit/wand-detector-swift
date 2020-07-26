@@ -1,5 +1,8 @@
 import CoreVideo
 
+public typealias ImageSize = (width: UInt, height: UInt)
+public typealias ImageRegion = (origin: (x: UInt, y: UInt), size: ImageSize)
+
 public enum WandDetectorError: Error {
     case invalidRegionOfInterest
     case invalidMaxRetainedOutputImages
@@ -9,46 +12,55 @@ public enum WandDetectorError: Error {
 public struct WandDetector {
     // TODO: calculate minPixels based on some fidelity length and
     // screen projection size at some standard gameplay distance for that screen
-    private let minPixels = 50_000
+    private let minPixels: UInt = 50_000
 
-    private let region: CGRect
+    private let roi: ImageRegion
+    private let inputSize: ImageSize
     private let pool: CVPixelBufferPool
     private let transform: CGAffineTransform
 
     // MARK: Initialization
 
-    public init(inputImageDimensions dimensions: CGSize, regionOfInterest region: CGRect, maxRetainedOutputImages maxRetain: UInt = 1) throws {
+    public init(inputSize: ImageSize, regionOfInterest roi: ImageRegion, maxRetainedOutputImages maxRetain: UInt = 1) throws {
         // verify maxRetain is positive
-        if maxRetain <= 0 {
+        guard maxRetain > 0 else {
             throw WandDetectorError.invalidMaxRetainedOutputImages
         }
 
-        // verify that dimensions contain region
-        let dimensionsRect = CGRect(origin: CGPoint(x: 0, y: 0), size: dimensions)
-        if !dimensionsRect.contains(region) {
+        // verify roi size is positive
+        guard roi.size.width > 0 && roi.size.height > 0 else {
+           throw WandDetectorError.invalidRegionOfInterest
+        }
+
+        // convert inputSize and roi to CGRects
+        let inputRect = CGRect(origin: CGPoint.zero, size: CGSize(width: Int(inputSize.width), height: Int(inputSize.height)))
+        let roiRect = CGRect(origin: CGPoint(x: Int(roi.origin.x), y: Int(roi.origin.y)), size: CGSize(width: Int(roi.size.width), height: Int(roi.size.height)))
+
+        // verify that inputRect contains roiRect
+        guard inputRect.contains(roiRect) else {
             throw WandDetectorError.invalidRegionOfInterest
         }
 
         // create the translation transform
-        let dx = -region.origin.x
-        let dy = -region.origin.y
+        let dx = -roiRect.origin.x
+        let dy = -roiRect.origin.y
         var transform = CGAffineTransform(translationX: dx, y: dy)
 
         // width and height for the output pixel buffers
-        var outWidth = region.width
-        var outHeight = region.height
+        var outputWidth = roiRect.width
+        var outputHeight = roiRect.height
 
-        let pixels = outWidth * outHeight
-        if pixels > CGFloat(minPixels) { // create the downscale transform
-            let downscale = CGFloat(sqrt(Double(minPixels) / Double(pixels)))
+        let outputPixels = outputWidth * outputHeight
+        if outputPixels > CGFloat(minPixels) { // create the downscale transform
+            let downscale = CGFloat(sqrt(Double(minPixels) / Double(outputPixels)))
 
-            // adjust the scale so width and height will be integers
-            let downscaledRegion = region.applying(CGAffineTransform(scaleX: downscale, y: downscale))
-            outWidth = downscaledRegion.width.rounded(.up)
-            outHeight = downscaledRegion.height.rounded(.up)
+            // adjust the scale so output width and height will be integers
+            let downscaledRoiRect = roiRect.applying(CGAffineTransform(scaleX: downscale, y: downscale))
+            outputWidth = downscaledRoiRect.width.rounded(.up)
+            outputHeight = downscaledRoiRect.height.rounded(.up)
 
-            let adjustedScaleX = outWidth / region.width
-            let adjustedScaleY = outHeight / region.height
+            let adjustedScaleX = outputWidth / roiRect.width
+            let adjustedScaleY = outputHeight / roiRect.height
 
             // concatenate with the translation transform
             transform = transform.concatenating(CGAffineTransform(scaleX: adjustedScaleX, y: adjustedScaleY))
@@ -57,8 +69,8 @@ public struct WandDetector {
         // create the output pixel buffer pool
         let poolAttributes: NSDictionary = [kCVPixelBufferPoolMinimumBufferCountKey: maxRetain]
         let pixelBufferAttributes: NSDictionary = [
-            kCVPixelBufferWidthKey: outWidth,
-            kCVPixelBufferHeightKey: outHeight,
+            kCVPixelBufferWidthKey: outputWidth,
+            kCVPixelBufferHeightKey: outputHeight,
             kCVPixelBufferIOSurfacePropertiesKey: [:],
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_OneComponent8
         ]
@@ -86,8 +98,9 @@ public struct WandDetector {
         assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code \(code)")
 
         // initialize stored properties
+        self.roi = roi
         self.pool = pool
-        self.region = region
+        self.inputSize = inputSize
         self.transform = transform
     }
 }
