@@ -1,7 +1,7 @@
 import CoreVideo
 
-public typealias ImageSize = (width: UInt, height: UInt)
-public typealias ImageRegion = (origin: (x: UInt, y: UInt), size: ImageSize)
+public typealias ImageSize = (width: Int, height: Int)
+public typealias ImageRegion = (origin: (x: Int, y: Int), size: ImageSize)
 
 public enum WandDetectorError: Error {
     case invalidRegionOfInterest
@@ -12,7 +12,7 @@ public enum WandDetectorError: Error {
 public struct WandDetector {
     // TODO: calculate minPixels based on some fidelity length and
     // screen projection size at some standard gameplay distance for that screen
-    private let minPixels: UInt = 50_000
+    private let minPixels = 50_000
 
     private let roi: ImageRegion
     private let inputSize: ImageSize
@@ -21,7 +21,7 @@ public struct WandDetector {
 
     // MARK: Initialization
 
-    public init(inputSize: ImageSize, regionOfInterest roi: ImageRegion, maxRetainedOutputImages maxRetain: UInt = 1) throws {
+    public init(inputSize: ImageSize, regionOfInterest roi: ImageRegion, maxRetainedOutputImages maxRetain: Int = 1) throws {
         // verify maxRetain is positive
         guard maxRetain > 0 else {
             throw WandDetectorError.invalidMaxRetainedOutputImages
@@ -33,8 +33,8 @@ public struct WandDetector {
         }
 
         // convert inputSize and roi to CGRects
-        let inputRect = CGRect(origin: CGPoint.zero, size: CGSize(width: Int(inputSize.width), height: Int(inputSize.height)))
-        let roiRect = CGRect(origin: CGPoint(x: Int(roi.origin.x), y: Int(roi.origin.y)), size: CGSize(width: Int(roi.size.width), height: Int(roi.size.height)))
+        let inputRect = CGRect(origin: CGPoint.zero, size: CGSize(width: inputSize.width, height: inputSize.height))
+        let roiRect = CGRect(origin: CGPoint(x: roi.origin.x, y: roi.origin.y), size: CGSize(width: roi.size.width, height: roi.size.height))
 
         // verify that inputRect contains roiRect
         guard inputRect.contains(roiRect) else {
