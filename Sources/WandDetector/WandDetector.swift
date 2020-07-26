@@ -29,35 +29,30 @@ public struct WandDetector {
             throw WandDetectorError.invalidRegionOfInterest
         }
 
-        self.region = region
-
         // create the translation transform
-        let dx = -self.region.origin.x
-        let dy = -self.region.origin.y
+        let dx = -region.origin.x
+        let dy = -region.origin.y
         var transform = CGAffineTransform(translationX: dx, y: dy)
 
         // width and height for the output pixel buffers
-        var outWidth = self.region.width
-        var outHeight = self.region.height
+        var outWidth = region.width
+        var outHeight = region.height
 
-        // create the downscale transform
         let pixels = outWidth * outHeight
-        if pixels > CGFloat(self.minPixels) {
-            let downscale = CGFloat(sqrt(Double(self.minPixels) / Double(pixels)))
+        if pixels > CGFloat(minPixels) { // create the downscale transform
+            let downscale = CGFloat(sqrt(Double(minPixels) / Double(pixels)))
 
             // adjust the scale so width and height will be integers
-            let downscaledRegion = self.region.applying(CGAffineTransform(scaleX: downscale, y: downscale))
+            let downscaledRegion = region.applying(CGAffineTransform(scaleX: downscale, y: downscale))
             outWidth = downscaledRegion.width.rounded(.up)
             outHeight = downscaledRegion.height.rounded(.up)
 
-            let adjustedScaleX = outWidth / self.region.width
-            let adjustedScaleY = outHeight / self.region.height
+            let adjustedScaleX = outWidth / region.width
+            let adjustedScaleY = outHeight / region.height
 
             // concatenate with the translation transform
             transform = transform.concatenating(CGAffineTransform(scaleX: adjustedScaleX, y: adjustedScaleY))
         }
-
-        self.transform = transform
 
         // create the output pixel buffer pool
         let poolAttributes: NSDictionary = [kCVPixelBufferPoolMinimumBufferCountKey: maxRetain]
@@ -74,8 +69,6 @@ public struct WandDetector {
             throw WandDetectorError.failedPixelBufferPoolCreation(code: code)
         }
 
-        self.pool = pool
-
         // preallocate maxRetain number of buffers
         var pixelBufferOut: CVPixelBuffer?
         var pixelBufferRetainer = [CVPixelBuffer]() // prevents recycling during the below while loop
@@ -83,7 +76,7 @@ public struct WandDetector {
 
         code = kCVReturnSuccess
         while code == kCVReturnSuccess {
-            code = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, self.pool, auxAttributes, &pixelBufferOut)
+            code = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, pool, auxAttributes, &pixelBufferOut)
             if let pixelBuffer = pixelBufferOut {
                 pixelBufferRetainer.append(pixelBuffer)
             }
@@ -91,5 +84,10 @@ public struct WandDetector {
         }
 
         assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code \(code)")
+
+        // initialize stored properties
+        self.region = region
+        self.transform = transform
+        self.pool = pool
     }
 }
