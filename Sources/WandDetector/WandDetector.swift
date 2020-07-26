@@ -86,8 +86,8 @@ public struct WandDetector {
         assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code \(code)")
 
         // initialize stored properties
+        self.pool = pool
         self.region = region
         self.transform = transform
-        self.pool = pool
     }
 }
