@@ -1,9 +1,12 @@
 import CoreVideo
 
 public typealias ImageSize = (width: Int, height: Int)
+public typealias Wand = (center: (x: Double, y: Double), radius: Double)
 public typealias ImageRegion = (origin: (x: Int, y: Int), size: ImageSize)
 
 public enum WandDetectorError: Error {
+    case invalidWand
+    case invalidImage
     case invalidRegionOfInterest
     case invalidMaxRetainedOutputImages
     case couldNotCreatePixelBufferPool(code: CVReturn)
@@ -32,11 +35,11 @@ public struct WandDetector {
            throw WandDetectorError.invalidRegionOfInterest
         }
 
-        // convert inputSize and roi to CGRects
+        // make CGRects from inputSize and roi
         let inputRect = CGRect(origin: CGPoint.zero, size: CGSize(width: inputSize.width, height: inputSize.height))
         let roiRect = CGRect(origin: CGPoint(x: roi.origin.x, y: roi.origin.y), size: CGSize(width: roi.size.width, height: roi.size.height))
 
-        // verify that inputRect contains roiRect
+        // verify inputRect contains roiRect
         guard inputRect.contains(roiRect) else {
             throw WandDetectorError.invalidRegionOfInterest
         }
@@ -102,5 +105,35 @@ public struct WandDetector {
         self.pool = pool
         self.inputSize = inputSize
         self.transform = transform
+    }
+
+    // MARK: Calibration
+
+    public func calibrate(for wand: Wand, inRegionOfInterestOf image: CVImageBuffer) throws -> CVImageBuffer {
+        // verify image size is correct
+        let width = CVPixelBufferGetWidth(image)
+        let height = CVPixelBufferGetHeight(image)
+        guard width == self.inputSize.width && height == self.inputSize.height else {
+            throw WandDetectorError.invalidImage
+        }
+
+        // make CGRects from roi and wand
+        let roiRect = CGRect(origin: CGPoint(x: self.roi.origin.x, y: self.roi.origin.y), size: CGSize(width: self.roi.size.width, height: self.roi.size.height))
+        let diameter = wand.radius * 2
+        var wandRect = CGRect(origin: CGPoint(x: wand.center.x - wand.radius, y: wand.center.y - wand.radius), size: CGSize(width: diameter, height: diameter))
+
+        assert(wandRect.midX == CGFloat(wand.center.x) && wandRect.midY == CGFloat(wand.center.y), "wandRect is centered incorrectly")
+
+        // verify roiRect contains wandRect
+        guard roiRect.contains(wandRect) else {
+            throw WandDetectorError.invalidWand
+        }
+
+        // apply the transform to wandRect
+        wandRect = wandRect.applying(self.transform)
+
+        // begin binary search of optimal filter parameters
+        //
+        //
     }
 }
