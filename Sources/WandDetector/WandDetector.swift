@@ -1,4 +1,5 @@
-import CoreVideo
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
 public typealias ImageSize = (width: Int, height: Int)
 public typealias Wand = (center: (x: Double, y: Double), radius: Double)
@@ -18,9 +19,13 @@ public struct WandDetector {
     private let minPixels = 50_000
 
     private let roi: ImageRegion
+    private let context: CIContext
     private let inputSize: ImageSize
     private let pool: CVPixelBufferPool
     private let transform: CGAffineTransform
+    private let erosionFilter: CIConvolution
+    private let dilationFilter: CIConvolution
+    private let thresholdFilter: CIColorCubeWithColorSpace
 
     // MARK: Initialization
 
@@ -100,11 +105,34 @@ public struct WandDetector {
 
         assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code \(code)")
 
+        // create the context
+        let options: [CIContextOption : Any] = [
+            CIContextOption.cacheIntermediates: false,
+            CIContextOption.workingColorSpace: CGColorSpace(name: CGColorSpace.itur_709)!,
+        ]
+        let context = CIContext(options: options)
+
+        // create the filters
+        let erosionFilter = CIFilter.convolution3X3()
+        let dilationFilter = CIFilter.convolution3X3()
+        let thresholdFilter = CIFilter.colorCubeWithColorSpace()
+
+        // configure the filters
+        let weights = CIVector(string: "[1 1 1 1 1 1 1 1 1]")
+        dilationFilter.weights = weights
+        erosionFilter.weights = weights
+        erosionFilter.bias = -Float(weights.count - 1)
+        thresholdFilter.colorSpace = context.workingColorSpace
+
         // initialize stored properties
         self.roi = roi
         self.pool = pool
+        self.context = context
         self.inputSize = inputSize
         self.transform = transform
+        self.erosionFilter = erosionFilter
+        self.dilationFilter = dilationFilter
+        self.thresholdFilter = thresholdFilter
     }
 
     // MARK: Calibration
