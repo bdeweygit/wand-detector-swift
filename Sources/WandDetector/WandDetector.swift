@@ -109,7 +109,7 @@ public struct WandDetector {
 
     // MARK: Calibration
 
-    public func calibrate(for wand: Wand, inRegionOfInterestOf image: CVImageBuffer) throws -> CVImageBuffer {
+    public func calibrate(using wand: Wand, inRegionOfInterestIn image: CVImageBuffer) throws -> CVImageBuffer {
         // verify image size is correct
         let width = CVPixelBufferGetWidth(image)
         let height = CVPixelBufferGetHeight(image)
