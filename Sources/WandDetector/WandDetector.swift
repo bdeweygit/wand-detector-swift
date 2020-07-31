@@ -49,7 +49,7 @@ public struct WandDetector {
         }
 
         // make CGRects from inputSize and roi
-        let inputSizeRect = CGRect(origin: CGPoint.zero, size: CGSize(width: inputSize.width, height: inputSize.height))
+        let inputSizeRect = CGRect(origin: .zero, size: CGSize(width: inputSize.width, height: inputSize.height))
         let roiRect = CGRect(origin: CGPoint(x: roi.origin.x, y: roi.origin.y), size: CGSize(width: roi.size.width, height: roi.size.height))
 
         // verify inputSizeRect contains roiRect
@@ -115,8 +115,8 @@ public struct WandDetector {
 
         // create the context
         let options: [CIContextOption : Any] = [
-            CIContextOption.cacheIntermediates: false,
-            CIContextOption.workingColorSpace: CGColorSpace(name: CGColorSpace.itur_709)!,
+            .cacheIntermediates: false,
+            .workingColorSpace: CGColorSpace(name: CGColorSpace.itur_709)!,
         ]
         let context = CIContext(options: options)
 
