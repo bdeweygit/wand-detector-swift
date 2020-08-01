@@ -6,6 +6,7 @@ public typealias ImageSize = (width: Int, height: Int)
 public typealias Wand = (center: (x: Double, y: Double), radius: Double)
 public typealias ImageRegion = (origin: (x: Int, y: Int), size: ImageSize)
 
+private typealias PixelPoint = (x: Int, y: Int)
 private typealias ColorCube = (data: Data, dimension: Float)
 
 public enum WandDetectorError: Error {
@@ -114,11 +115,10 @@ public struct WandDetector {
         assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code \(code)")
 
         // create the context
-        let options: [CIContextOption : Any] = [
+        let context = CIContext(options: [
             .cacheIntermediates: false,
             .workingColorSpace: CGColorSpace(name: CGColorSpace.itur_709)!,
-        ]
-        let context = CIContext(options: options)
+        ])
 
         // create the filters
         let thresholdFilter = CIFilter.colorCube()
@@ -163,9 +163,9 @@ public struct WandDetector {
             throw WandDetectorError.invalidImage
         }
 
-        // make CGRect from wand
+        // make a CGRect that bounds the wand
         let diameter = wand.radius * 2
-        var wandRect = CGRect(origin: CGPoint(x: wand.center.x - wand.radius, y: wand.center.y - wand.radius), size: CGSize(width: diameter, height: diameter))
+        let wandRect = CGRect(origin: CGPoint(x: wand.center.x - wand.radius, y: wand.center.y - wand.radius), size: CGSize(width: diameter, height: diameter))
 
         assert(wandRect.midX == CGFloat(wand.center.x) && wandRect.midY == CGFloat(wand.center.y), "wandRect is centered incorrectly")
 
@@ -175,7 +175,10 @@ public struct WandDetector {
         }
 
         // apply the transform to wandRect
-        wandRect = wandRect.applying(self.transform)
+        let transformedWandRect = wandRect.applying(self.transform)
+
+        // create the transformed wand
+        let transformedWand: Wand = (center: (x: Double(transformedWandRect.midX), y: Double(transformedWandRect.midY)), radius: Double(transformedWandRect.width / 2))
 
 
 
@@ -185,10 +188,11 @@ public struct WandDetector {
         // cut the hue circle at the point so that it becomes a hue line segment
 
         // binary search the upper and lower hue
-
         // binary search the upper and lower saturation
-
         // binary search the upper and lower brightness
+
+        // binary search criterion is...
+        // number of white pixels in the wand circle are >= %? of the total in circle
 
         var minH: CGFloat = 0, maxH: CGFloat = 1
         var minS: CGFloat = 0, maxS: CGFloat = 1
@@ -198,7 +202,42 @@ public struct WandDetector {
         thresholdFilter.cubeData = colorCube.data
         thresholdFilter.cubeDimension = colorCube.dimension
 
-        let filtered = try self.filter(image: image)
+        let filteredImage = try self.filter(image: image)
+
+        let activation = self.activation(of: transformedWand, in: filteredImage)
+    }
+
+    // MARK: Activation Measurement
+
+    private func activation(of wand: Wand, in image: CVImageBuffer) -> Float {
+        return image.withPixelGetter { getPixelAt in
+            // start point
+            let startX = Int((wand.center.x - wand.radius).rounded(.down))
+            let startY = Int((wand.center.y - wand.radius).rounded(.down))
+
+            // end point
+            let diameter = Int((wand.radius * 2).rounded(.up))
+            let endX = startX + diameter
+            let endY = startY + diameter
+
+            var total: Float = 0
+            var active: Float = 0
+
+            for x in startX...endX {
+                for y in startY...endY {
+                    let point: PixelPoint = (x: x, y: y)
+                    if let pixel = getPixelAt(point) {
+                        let length = sqrt(pow(Double(x) - wand.center.x, 2) + pow(Double(y) - wand.center.y, 2))
+                        if length <= wand.radius {
+                            total += 1
+                            if pixel != 0 { active += 1 }
+                        }
+                    }
+                }
+            }
+
+            return active / total
+        }
     }
 
     // MARK: Filtration
@@ -300,11 +339,42 @@ public struct WandDetector {
               }
           }
 
-          var data = Data()
-          cube.withUnsafeBufferPointer({ buffer in
-              data.append(buffer)
-          })
+          let data = cube.withUnsafeBufferPointer { buffer in Data(buffer: buffer) }
 
           return (data: data, dimension: dimension)
       }
+}
+
+// MARK: Extensions
+
+private extension CVImageBuffer {
+    func withPixelGetter<R>(body: ((PixelPoint) -> UInt8?) -> R) -> R {
+        let width = CVPixelBufferGetWidth(self)
+        let height = CVPixelBufferGetHeight(self)
+        let bpr = CVPixelBufferGetBytesPerRow(self)
+
+        let widthRange = 0..<width
+        let heightRange = 0..<height
+
+        // lock
+        CVPixelBufferLockBaseAddress(self, .readOnly)
+
+        // get pixels
+        let baseAddress = CVPixelBufferGetBaseAddress(self)
+        let pixels = unsafeBitCast(baseAddress, to: UnsafePointer<UInt8>.self)
+
+        // call body with getter function
+        let something = body { point in
+            let (x, y) = point
+            if widthRange.contains(x) && heightRange.contains(y) {
+                return pixels[x + (y * bpr)]
+            }
+            return nil
+        }
+
+        // unlock
+        CVPixelBufferUnlockBaseAddress(self, .readOnly)
+
+        return something
+    }
 }
