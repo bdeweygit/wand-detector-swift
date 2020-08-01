@@ -366,10 +366,8 @@ private extension CVImageBuffer {
         // call body with getter function
         let something = body { point in
             let (x, y) = point
-            if widthRange.contains(x) && heightRange.contains(y) {
-                return pixels[x + (y * bpr)]
-            }
-            return nil
+            let inImage = widthRange.contains(x) && heightRange.contains(y)
+            return inImage ? pixels[x + (y * bpr)] : nil
         }
 
         // unlock
