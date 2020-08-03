@@ -174,18 +174,64 @@ public struct WandDetector {
             throw WandDetectorError.invalidWand
         }
 
-        // apply the transform to wandRect
-        let transformedWandRect = wandRect.applying(self.transform)
-
         // create the transformed wand
+        let transformedWandRect = wandRect.applying(self.transform)
         let transformedWand: Wand = (center: (x: Double(transformedWandRect.midX), y: Double(transformedWandRect.midY)), radius: Double(transformedWandRect.width / 2))
 
+        // crop and transform the image
+        let transformedImage = CIImage(cvImageBuffer: image).cropped(to: self.roiRect).transformed(by: self.transform)
+
+        // get width and height of transformedImage
+        let transformedImageWidth = Int(transformedImage.extent.width.rounded(.up))
+        let transformedImageHeight = Int(transformedImage.extent.height.rounded(.up))
+
+        // create the output image to render into
+        var pixelBufferOut: CVPixelBuffer?
+        let code = CVPixelBufferCreate(kCFAllocatorDefault, transformedImageWidth, transformedImageHeight, kCVPixelFormatType_32BGRA, nil, &pixelBufferOut)
+        guard let outputImage = pixelBufferOut else {
+            throw WandDetectorError.couldNotCreatePixelBuffer(code: code)
+        }
+
+        // render to the output image
+        self.context.render(transformedImage, to: outputImage)
+
+        // find the optimal hue arc of the hue circle to bisect with degree 0
+        var optimalArc = 0
+        var smallestPercentInArc = Float.infinity
+        let arcs = 6 // hue arcs of the hue circle: 3 primaries and 3 secondaries
+        let arcAngle: CGFloat = (360 / CGFloat(arcs)) / 360
+        let hueRotation: CGFloat = 30 / 360 // rotates degree 0 to the start of the first hue arc
+
+        for arc in 0..<arcs {
+            let lowerAngle = CGFloat(arc) * arcAngle
+            let arcRange: ClosedRange<CGFloat> = lowerAngle...(lowerAngle + arcAngle)
+
+            let percentInArc = self.percent(of: transformedWand, in: outputImage, ofPixelType: UInt32.self) { pixel in
+                let blue = CGFloat(pixel >> 24) / 255
+                let green = CGFloat((pixel << 8) >> 24) / 255
+                let red = CGFloat((pixel << 16) >> 24) / 255
+
+                let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
+
+                var hue: CGFloat = 0;
+                rgba.getHue(&hue, saturation: nil, brightness: nil, alpha: nil)
+
+                hue = (hue + hueRotation).truncatingRemainder(dividingBy: 1)
+
+                return arcRange.contains(hue)
+            }
+
+            if percentInArc < smallestPercentInArc {
+                smallestPercentInArc = percentInArc
+                optimalArc = arc
+            }
+        }
 
 
-        // pick a point on the hue circle
-        // calculate the percentage of wand pixels within the 90 degree angle bisected by the point
-        // if the percentage is >= ? then rotate the point 180 degrees around the ring
-        // cut the hue circle at the point so that it becomes a hue line segment
+        // calculate the percentage of wand pixels within the
+        // 60 degree angle on the hue circle bisected by the unit circle's 0 degree ray
+        // if the percentage is >= ? then rotate the unit circle by 180 degrees
+
 
         // binary search the upper and lower hue
         // binary search the upper and lower saturation
@@ -194,23 +240,23 @@ public struct WandDetector {
         // binary search criterion is...
         // number of white pixels in the wand circle are >= %? of the total in circle
 
-        var minH: CGFloat = 0, maxH: CGFloat = 1
-        var minS: CGFloat = 0, maxS: CGFloat = 1
-        var minB: CGFloat = 0, maxB: CGFloat = 1
-
-        let colorCube = self.createColorCube(hueRange: minH...maxH, saturationRange: minS...maxS, brightnessRange: minB...maxB)
-        thresholdFilter.cubeData = colorCube.data
-        thresholdFilter.cubeDimension = colorCube.dimension
-
-        let filteredImage = try self.filter(image: image)
-
-        let activation = self.activation(of: transformedWand, in: filteredImage)
+//        var minH: CGFloat = 0, maxH: CGFloat = 1
+//        var minS: CGFloat = 0, maxS: CGFloat = 1
+//        var minB: CGFloat = 0, maxB: CGFloat = 1
+//
+//        let colorCube = self.createColorCube(hueRange: minH...maxH, saturationRange: minS...maxS, brightnessRange: minB...maxB)
+//        thresholdFilter.cubeData = colorCube.data
+//        thresholdFilter.cubeDimension = colorCube.dimension
+//
+//        let filteredImage = try self.filter(image: image)
+//
+//        let activation = self.activation(of: transformedWand, in: filteredImage)
     }
 
     // MARK: Activation Measurement
 
-    private func activation(of wand: Wand, in image: CVImageBuffer) -> Float {
-        return image.withPixelGetter { getPixelAt in
+    private func percent<T>(of wand: Wand, in image: CVImageBuffer, ofPixelType type: T.Type, satisfying condition: (T) -> Bool) -> Float {
+        return image.withPixelGetter(getting: type) { getPixelAt in
             // start point
             let startX = Int((wand.center.x - wand.radius).rounded(.down))
             let startY = Int((wand.center.y - wand.radius).rounded(.down))
@@ -221,7 +267,7 @@ public struct WandDetector {
             let endY = startY + diameter
 
             var total: Float = 0
-            var active: Float = 0
+            var passing: Float = 0
 
             for x in startX...endX {
                 for y in startY...endY {
@@ -230,23 +276,23 @@ public struct WandDetector {
                         let length = sqrt(pow(Double(x) - wand.center.x, 2) + pow(Double(y) - wand.center.y, 2))
                         if length <= wand.radius {
                             total += 1
-                            if pixel != 0 { active += 1 }
+                            if condition(pixel) { passing += 1 }
                         }
                     }
                 }
             }
 
-            return active / total
+            return passing / total
         }
     }
 
     // MARK: Filtration
 
     private func filter(image: CVImageBuffer) throws -> CVImageBuffer {
-        // create the output pixel buffer to render into
+        // create the output image to render into
         var pixelBufferOut: CVPixelBuffer?
         let code = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, self.pool, &pixelBufferOut)
-        guard let output = pixelBufferOut else {
+        guard let outputImage = pixelBufferOut else {
             throw WandDetectorError.couldNotCreatePixelBuffer(code: code)
         }
 
@@ -299,56 +345,58 @@ public struct WandDetector {
         // when contour tracing don't forget to correct wand's
         // area according to the number of pixels eroded
 
-        // render to the output
-        self.context.render(heightEroded, to: output)
+        // render to the output image
+        self.context.render(heightEroded, to: outputImage)
 
-        return output
+        return outputImage
     }
 
     // MARK: Color Cube Creation
 
-      private func createColorCube(hueRange: ClosedRange<CGFloat>, saturationRange: ClosedRange<CGFloat>, brightnessRange: ClosedRange<CGFloat>) -> ColorCube {
-          var cube = [Float]()
+    private func createColorCube(hueRotation: CGFloat = 0, hueRange: ClosedRange<CGFloat>, saturationRange: ClosedRange<CGFloat>, brightnessRange: ClosedRange<CGFloat>) -> ColorCube {
+        var cube = [Float]()
 
-          let size = 64
-          let dimension = Float(size)
+        let size = 64
+        let dimension = Float(size)
 
-          for z in 0 ..< size {
-              let blue = CGFloat(z) / CGFloat(size-1)
+        for z in 0 ..< size {
+            let blue = CGFloat(z) / CGFloat(size-1)
 
-              for y in 0 ..< size {
-                  let green = CGFloat(y) / CGFloat(size-1)
+            for y in 0 ..< size {
+                let green = CGFloat(y) / CGFloat(size-1)
 
-                  for x in 0 ..< size {
-                      let red = CGFloat(x) / CGFloat(size-1)
+                for x in 0 ..< size {
+                    let red = CGFloat(x) / CGFloat(size-1)
 
-                      var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0
-                      let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
-                      rgba.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
+                    let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
+                    var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0
+                    rgba.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
 
-                      let color: Float =
-                          hueRange.contains(hue) &&
-                          saturationRange.contains(saturation) &&
-                          brightnessRange.contains(brightness) ? 1 : 0
+                    hue = (hue + hueRotation).truncatingRemainder(dividingBy: 1)
 
-                      cube.append(color) // red
-                      cube.append(color) // green
-                      cube.append(color) // blue
-                      cube.append(1)     // alpha
-                  }
-              }
-          }
+                    let color: Float =
+                        hueRange.contains(hue) &&
+                        saturationRange.contains(saturation) &&
+                        brightnessRange.contains(brightness) ? 1 : 0
 
-          let data = cube.withUnsafeBufferPointer { buffer in Data(buffer: buffer) }
+                    cube.append(color) // red
+                    cube.append(color) // green
+                    cube.append(color) // blue
+                    cube.append(1)     // alpha
+                }
+            }
+        }
 
-          return (data: data, dimension: dimension)
-      }
+        let data = cube.withUnsafeBufferPointer { buffer in Data(buffer: buffer) }
+
+        return (data: data, dimension: dimension)
+    }
 }
 
 // MARK: Extensions
 
 private extension CVImageBuffer {
-    func withPixelGetter<R>(body: ((PixelPoint) -> UInt8?) -> R) -> R {
+    func withPixelGetter<T, R>(getting type: T.Type, body: ((PixelPoint) -> T?) -> R) -> R {
         let width = CVPixelBufferGetWidth(self)
         let height = CVPixelBufferGetHeight(self)
         let bpr = CVPixelBufferGetBytesPerRow(self)
@@ -356,23 +404,19 @@ private extension CVImageBuffer {
         let widthRange = 0..<width
         let heightRange = 0..<height
 
-        // lock
+        // lock and later unlock
         CVPixelBufferLockBaseAddress(self, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(self, .readOnly) }
 
         // get pixels
         let baseAddress = CVPixelBufferGetBaseAddress(self)
-        let pixels = unsafeBitCast(baseAddress, to: UnsafePointer<UInt8>.self)
+        let pixels = unsafeBitCast(baseAddress, to: UnsafePointer<T>.self)
 
-        // call body with getter function
-        let something = body { point in
+        // call body with a getter function
+        return body { point in
             let (x, y) = point
             let inImage = widthRange.contains(x) && heightRange.contains(y)
             return inImage ? pixels[x + (y * bpr)] : nil
         }
-
-        // unlock
-        CVPixelBufferUnlockBaseAddress(self, .readOnly)
-
-        return something
     }
 }
