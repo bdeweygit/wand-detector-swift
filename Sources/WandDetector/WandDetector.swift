@@ -274,6 +274,11 @@ public struct WandDetector {
                 }
             }
         })
+
+        // if calibration requires the user to position the wand m meters distance from the camera
+        // then we can compute the size of the wand at max_m distance and see if that size is >=
+        // some minimum size (maybe 3x3 pixels) which can then be used as the break condition
+        // for calibrating the width and height erosion filters
     }
 
     // MARK: Measurement
