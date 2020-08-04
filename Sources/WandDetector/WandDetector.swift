@@ -206,20 +206,18 @@ public struct WandDetector {
             let lowerAngle = CGFloat(arc) * arcAngle
             let arcRange: ClosedRange<CGFloat> = lowerAngle...(lowerAngle + arcAngle)
 
-            let percentInArc = self.percent(of: transformedWand, in: outputImage, ofPixelType: UInt32.self) { pixel in
+            let percentInArc = self.measure(percentOf: transformedWand, satisfying: { pixel in
                 let blue = CGFloat(pixel >> 24) / 255
                 let green = CGFloat((pixel << 8) >> 24) / 255
                 let red = CGFloat((pixel << 16) >> 24) / 255
-
                 let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
 
                 var hue: CGFloat = 0;
                 rgba.getHue(&hue, saturation: nil, brightness: nil, alpha: nil)
-
                 hue = (hue + thirtyDegrees).truncatingRemainder(dividingBy: 1)
 
                 return arcRange.contains(hue)
-            }
+            }, in: outputImage, ofPixelType: UInt32.self)
 
             if percentInArc < leastPercentInArc {
                 leastPercentInArc = percentInArc
@@ -229,13 +227,6 @@ public struct WandDetector {
 
         // rotates hue circle so that degree 0 bisects wandlessArc
         let hueRotation = CGFloat(wandlessArc) * arcAngle
-
-
-
-
-        // calculate the percentage of wand pixels within the
-        // 60 degree angle on the hue circle bisected by the unit circle's 0 degree ray
-        // if the percentage is >= ? then rotate the unit circle by 180 degrees
 
 
         // binary search the upper and lower hue
@@ -254,13 +245,11 @@ public struct WandDetector {
 //        thresholdFilter.cubeDimension = colorCube.dimension
 //
 //        let filteredImage = try self.filter(image: image)
-//
-//        let activation = self.activation(of: transformedWand, in: filteredImage)
     }
 
-    // MARK: Activation Measurement
+    // MARK: Measurement
 
-    private func percent<T>(of wand: Wand, in image: CVImageBuffer, ofPixelType type: T.Type, satisfying condition: (T) -> Bool) -> Double {
+    private func measure<T>(percentOf wand: Wand, satisfying condition: (T) -> Bool, in image: CVImageBuffer, ofPixelType type: T.Type) -> Double {
         return image.withPixelGetter(getting: type) { getPixelAt in
             // start point
             let startX = Int((wand.center.x - wand.radius).rounded(.down))
@@ -366,17 +355,15 @@ public struct WandDetector {
 
         for z in 0 ..< size {
             let blue = CGFloat(z) / CGFloat(size-1)
-
             for y in 0 ..< size {
                 let green = CGFloat(y) / CGFloat(size-1)
-
                 for x in 0 ..< size {
                     let red = CGFloat(x) / CGFloat(size-1)
 
                     let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
+
                     var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0
                     rgba.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
-
                     hue = (hue + hueRotation).truncatingRemainder(dividingBy: 1)
 
                     let color: Float =
