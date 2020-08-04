@@ -196,7 +196,7 @@ public struct WandDetector {
         self.context.render(transformedImage, to: outputImage)
 
         // find the arc on the hue circle containing the least percent of the wand
-        var optimalArc = 0
+        var wandlessArc = 0
         var leastPercentInArc = Double.infinity
         let arcs = 6 // arcs of the hue circle: 3 primaries and 3 secondaries
         let arcAngle = 1 / CGFloat(arcs)
@@ -223,12 +223,12 @@ public struct WandDetector {
 
             if percentInArc < leastPercentInArc {
                 leastPercentInArc = percentInArc
-                optimalArc = arc
+                wandlessArc = arc
             }
         }
 
-        // rotates the hue circle so that degree 0 bisects the optimal arc
-        let hueRotation = CGFloat(optimalArc) * arcAngle
+        // rotates hue circle so that degree 0 bisects wandlessArc
+        let hueRotation = CGFloat(wandlessArc) * arcAngle
 
 
 
