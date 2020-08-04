@@ -73,8 +73,8 @@ public struct WandDetector {
 
             // adjust the scale so output width and height will be integers
             let downscaledRoiRect = roiRect.applying(CGAffineTransform(scaleX: downscale, y: downscale))
-            outputWidth = downscaledRoiRect.width.rounded(.up)
-            outputHeight = downscaledRoiRect.height.rounded(.up)
+            outputWidth = downscaledRoiRect.width.rounded(.down)
+            outputHeight = downscaledRoiRect.height.rounded(.down)
 
             let adjustedScaleX = outputWidth / roiRect.width
             let adjustedScaleY = outputHeight / roiRect.height
@@ -182,8 +182,8 @@ public struct WandDetector {
         let transformedImage = CIImage(cvImageBuffer: image).cropped(to: self.roiRect).transformed(by: self.transform)
 
         // get width and height of transformedImage
-        let transformedImageWidth = Int(transformedImage.extent.width.rounded(.up))
-        let transformedImageHeight = Int(transformedImage.extent.height.rounded(.up))
+        let transformedImageWidth = Int(transformedImage.extent.width.rounded(.down))
+        let transformedImageHeight = Int(transformedImage.extent.height.rounded(.down))
 
         // create the output image to render into
         var pixelBufferOut: CVPixelBuffer?
@@ -195,12 +195,12 @@ public struct WandDetector {
         // render to the output image
         self.context.render(transformedImage, to: outputImage)
 
-        // find the optimal hue arc of the hue circle to bisect with degree 0
+        // find the arc on the hue circle containing the least percent of the wand
         var optimalArc = 0
-        var smallestPercentInArc = Float.infinity
-        let arcs = 6 // hue arcs of the hue circle: 3 primaries and 3 secondaries
-        let arcAngle: CGFloat = (360 / CGFloat(arcs)) / 360
-        let hueRotation: CGFloat = 30 / 360 // rotates degree 0 to the start of the first hue arc
+        var leastPercentInArc = Double.infinity
+        let arcs = 6 // arcs of the hue circle: 3 primaries and 3 secondaries
+        let arcAngle = 1 / CGFloat(arcs)
+        let thirtyDegrees: CGFloat = 30 / 360 // rotates hue circle so that degree 0 is the start of the first arc
 
         for arc in 0..<arcs {
             let lowerAngle = CGFloat(arc) * arcAngle
@@ -216,16 +216,21 @@ public struct WandDetector {
                 var hue: CGFloat = 0;
                 rgba.getHue(&hue, saturation: nil, brightness: nil, alpha: nil)
 
-                hue = (hue + hueRotation).truncatingRemainder(dividingBy: 1)
+                hue = (hue + thirtyDegrees).truncatingRemainder(dividingBy: 1)
 
                 return arcRange.contains(hue)
             }
 
-            if percentInArc < smallestPercentInArc {
-                smallestPercentInArc = percentInArc
+            if percentInArc < leastPercentInArc {
+                leastPercentInArc = percentInArc
                 optimalArc = arc
             }
         }
+
+        // rotates the hue circle so that degree 0 bisects the optimal arc
+        let hueRotation = CGFloat(optimalArc) * arcAngle
+
+
 
 
         // calculate the percentage of wand pixels within the
@@ -255,7 +260,7 @@ public struct WandDetector {
 
     // MARK: Activation Measurement
 
-    private func percent<T>(of wand: Wand, in image: CVImageBuffer, ofPixelType type: T.Type, satisfying condition: (T) -> Bool) -> Float {
+    private func percent<T>(of wand: Wand, in image: CVImageBuffer, ofPixelType type: T.Type, satisfying condition: (T) -> Bool) -> Double {
         return image.withPixelGetter(getting: type) { getPixelAt in
             // start point
             let startX = Int((wand.center.x - wand.radius).rounded(.down))
@@ -266,8 +271,8 @@ public struct WandDetector {
             let endX = startX + diameter
             let endY = startY + diameter
 
-            var total: Float = 0
-            var passing: Float = 0
+            var total: Double = 0
+            var passing: Double = 0
 
             for x in startX...endX {
                 for y in startY...endY {
