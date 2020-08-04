@@ -12,7 +12,7 @@ private typealias ColorCube = (data: Data, dimension: Float)
 public enum WandDetectorError: Error {
     case invalidWand
     case invalidImage
-    case couldNotUseFilter
+    case couldNotFilterImage
     case invalidRegionOfInterest
     case invalidMaxRetainedOutputImages
     case couldNotCreatePixelBuffer(code: CVReturn)
@@ -31,10 +31,11 @@ public struct WandDetector {
     private let transform: CGAffineTransform
     private let thresholdFilter: CIColorCube
     private let binarizationFilter: CIColorPosterize
-    private let widthErosionFilter: CIMorphologyRectangleMinimum
-    private let heightErosionFilter: CIMorphologyRectangleMinimum
     private let squareErosionFilter: CIMorphologyRectangleMinimum
     private let squareDilationFilter: CIMorphologyRectangleMaximum
+
+    private var widthErosionFilter: CIMorphologyRectangleMinimum?
+    private var heightErosionFilter: CIMorphologyRectangleMinimum?
 
     // MARK: Initialization
 
@@ -123,17 +124,11 @@ public struct WandDetector {
         // create the filters
         let thresholdFilter = CIFilter.colorCube()
         let binarizationFilter = CIFilter.colorPosterize()
-        let widthErosionFilter = CIFilter.morphologyRectangleMinimum()
-        let heightErosionFilter = CIFilter.morphologyRectangleMinimum()
         let squareErosionFilter = CIFilter.morphologyRectangleMinimum()
         let squareDilationFilter = CIFilter.morphologyRectangleMaximum()
 
         // configure the filters
         binarizationFilter.levels = 2
-        widthErosionFilter.width = 9
-        widthErosionFilter.height = 1
-        heightErosionFilter.width = 1
-        heightErosionFilter.height = 9
         squareErosionFilter.width = 3
         squareErosionFilter.height = 3
         squareDilationFilter.width = 3
@@ -147,8 +142,6 @@ public struct WandDetector {
         self.transform = transform
         self.thresholdFilter = thresholdFilter
         self.binarizationFilter = binarizationFilter
-        self.widthErosionFilter = widthErosionFilter
-        self.heightErosionFilter = heightErosionFilter
         self.squareErosionFilter = squareErosionFilter
         self.squareDilationFilter = squareDilationFilter
     }
@@ -317,13 +310,6 @@ public struct WandDetector {
     // MARK: Filtration
 
     private func filter(image: CVImageBuffer) throws -> CVImageBuffer {
-        // create the output image to render into
-        var pixelBufferOut: CVPixelBuffer?
-        let code = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, self.pool, &pixelBufferOut)
-        guard let outputImage = pixelBufferOut else {
-            throw WandDetectorError.couldNotCreatePixelBuffer(code: code)
-        }
-
         // crop
         let cropped = CIImage(cvImageBuffer: image).cropped(to: self.roiRect)
 
@@ -332,51 +318,51 @@ public struct WandDetector {
 
         // threshold
         self.thresholdFilter.inputImage = transformed
-        guard let thresholded = self.thresholdFilter.outputImage else {
-            throw WandDetectorError.couldNotUseFilter
-        }
+        let thresholded = self.thresholdFilter.outputImage
 
         // binarize
         self.binarizationFilter.inputImage = thresholded
-        guard let binarized = self.binarizationFilter.outputImage else {
-            throw WandDetectorError.couldNotUseFilter
-        }
+        let binarized = self.binarizationFilter.outputImage
 
         // clamp
-        let clamped = binarized.clampedToExtent()
+        let clamped = binarized?.clampedToExtent()
 
         // square dilate
         self.squareDilationFilter.inputImage = clamped
-        guard let squareDilated = self.squareDilationFilter.outputImage else {
-            throw WandDetectorError.couldNotUseFilter
-        }
+        let squareDilated = self.squareDilationFilter.outputImage
 
         // square erode
         self.squareErosionFilter.inputImage = squareDilated
-        guard let squareEroded = self.squareErosionFilter.outputImage else {
-            throw WandDetectorError.couldNotUseFilter
+        let squareEroded = self.squareErosionFilter.outputImage
+
+        // maybe width erode
+        self.widthErosionFilter?.inputImage = squareEroded
+        let widthEroded = self.widthErosionFilter?.outputImage
+
+        // maybe height erode
+        self.heightErosionFilter?.inputImage = widthEroded
+        let heightEroded = self.heightErosionFilter?.outputImage
+
+        // unwrap
+        guard let filtered = heightEroded ?? squareEroded else {
+            throw WandDetectorError.couldNotFilterImage
         }
 
-        // width erode
-        self.widthErosionFilter.inputImage = squareEroded
-        guard let widthEroded = self.widthErosionFilter.outputImage else {
-            throw WandDetectorError.couldNotUseFilter
+        // create the output image to render into
+        var pixelBufferOut: CVPixelBuffer?
+        let code = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, self.pool, &pixelBufferOut)
+        guard let outputImage = pixelBufferOut else {
+            throw WandDetectorError.couldNotCreatePixelBuffer(code: code)
         }
 
-        // height erode
-        self.heightErosionFilter.inputImage = widthEroded
-        guard let heightEroded = self.heightErosionFilter.outputImage else {
-            throw WandDetectorError.couldNotUseFilter
-        }
+        // render to the output image
+        self.context.render(filtered, to: outputImage)
+
+        return outputImage
 
         // WARNING!
         // when contour tracing don't forget to correct wand's
         // area according to the number of pixels eroded
-
-        // render to the output image
-        self.context.render(heightEroded, to: outputImage)
-
-        return outputImage
     }
 
     // MARK: Color Cube Creation
