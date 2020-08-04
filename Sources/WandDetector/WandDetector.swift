@@ -200,18 +200,22 @@ public struct WandDetector {
         var leastPercentInArc = Double.infinity
         let arcs = 6 // arcs of the hue circle: 3 primaries and 3 secondaries
         let arcAngle = 1 / CGFloat(arcs)
-        let thirtyDegrees: CGFloat = 30 / 360 // rotates hue circle so that degree 0 is the start of the first arc
+        let thirtyDegrees: CGFloat = 30 / 360 // will rotate hue circle so that degree 0 is the start of the first arc
 
         for arc in 0..<arcs {
+            // create the arc's range
             let lowerAngle = CGFloat(arc) * arcAngle
             let arcRange: ClosedRange<CGFloat> = lowerAngle...(lowerAngle + arcAngle)
 
+            // calculate the percent of the wand within the arc
             let percentInArc = self.measure(percentOf: transformedWand, satisfying: { pixel in
+                // create an rgba color from the pixel data
                 let blue = CGFloat(pixel >> 24) / 255
                 let green = CGFloat((pixel << 8) >> 24) / 255
                 let red = CGFloat((pixel << 16) >> 24) / 255
                 let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
 
+                // get the hue of the rgba color
                 var hue: CGFloat = 0;
                 rgba.getHue(&hue, saturation: nil, brightness: nil, alpha: nil)
                 hue = (hue + thirtyDegrees).truncatingRemainder(dividingBy: 1)
@@ -225,26 +229,51 @@ public struct WandDetector {
             }
         }
 
-        // rotates hue circle so that degree 0 bisects wandlessArc
+        // will rotate hue circle so that degree 0 bisects wandlessArc
         let hueRotation = CGFloat(wandlessArc) * arcAngle
 
+        // calibrate the threshold filter by finding optimal
+        // HSB parameters for the threshold filter's color cube
+        let minActivity: Double = 0.8 // 80 percent <- why this number?
+        let maxPrecision: CGFloat = 1 / 64 // same as the precision of the color cube
+        var parameters: [CGFloat] = [0, 1, 0, 1, 0, 1] // [minH, maxH, minS, maxS, minB, maxB]
 
-        // binary search the upper and lower hue
-        // binary search the upper and lower saturation
-        // binary search the upper and lower brightness
+        try parameters.indices.forEach({ index in
+            let isMinParameter = index % 2 == 0
+            var lower = isMinParameter ? parameters[index] : parameters[index - 1]
+            var upper = isMinParameter ? parameters[index + 1] : parameters[index]
 
-        // binary search criterion is...
-        // number of white pixels in the wand circle are >= %? of the total in circle
+            // binary search the optimal value of parameters[index]
+            while (upper - lower) > maxPrecision {
+                let middle = (lower + upper) / 2
+                parameters[index] = middle
 
-//        var minH: CGFloat = 0, maxH: CGFloat = 1
-//        var minS: CGFloat = 0, maxS: CGFloat = 1
-//        var minB: CGFloat = 0, maxB: CGFloat = 1
-//
-//        let colorCube = self.createColorCube(hueRange: minH...maxH, saturationRange: minS...maxS, brightnessRange: minB...maxB)
-//        thresholdFilter.cubeData = colorCube.data
-//        thresholdFilter.cubeDimension = colorCube.dimension
-//
-//        let filteredImage = try self.filter(image: image)
+                // create HSB ranges
+                let hueRange = parameters[0]...parameters[1]
+                let saturationRange = parameters[2]...parameters[3]
+                let brightnessRange = parameters[4]...parameters[5]
+
+                // calibrate the threshold filter
+                let colorCube = self.createColorCube(hueRotation: hueRotation, hueRange: hueRange, saturationRange: saturationRange, brightnessRange: brightnessRange)
+                self.thresholdFilter.cubeData = colorCube.data
+                self.thresholdFilter.cubeDimension = colorCube.dimension
+
+                // filter the image
+                let filteredImage = try self.filter(image: image)
+
+                // calculate the percent of the wand that is active, i.e. not black
+                let percentActive = self.measure(percentOf: transformedWand, satisfying: { $0 != 0 }, in: filteredImage, ofPixelType: UInt8.self)
+
+                // reduce the search space
+                if percentActive >= minActivity {
+                    if isMinParameter { lower = middle }
+                    else { upper = middle }
+                } else {
+                    if isMinParameter { upper = middle }
+                    else { lower = middle }
+                }
+            }
+        })
     }
 
     // MARK: Measurement
