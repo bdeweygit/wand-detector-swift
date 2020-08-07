@@ -188,50 +188,59 @@ public struct WandDetector {
         // render to the output image
         self.context.render(transformedImage, to: outputImage)
 
-        // find the arc on the hue circle containing the least percent of the wand
-        var wandlessArc = 0
-        var leastPercentInArc = Double.infinity
-        let arcs = 6 // arcs of the hue circle: 3 primaries and 3 secondaries
-        let arcAngle = 1 / CGFloat(arcs)
-        let thirtyDegrees: CGFloat = 30 / 360 // will rotate hue circle so that degree 0 is the start of the first arc
+        // find the arc on the hue circle with the greatest percent of the wand
+        var wandfullArc = 0
+        var greatestWandfullness = Double.zero
+        let arcs = 12 // 3 primaries, 3 secondaries, 6 tertiaries
+        let unitRotation = 1 / CGFloat(arcs)
+        let halfRotation: CGFloat = 180 / 360
+        let halfArcAngle: CGFloat = 30 / 360 // arcs are 60 degrees
+        let prelimHueRange = (halfRotation - halfArcAngle)...(halfRotation + halfArcAngle)
 
         for arc in 0..<arcs {
-            // create the arc's range
-            let lowerAngle = CGFloat(arc) * arcAngle
-            let arcRange: ClosedRange<CGFloat> = lowerAngle...(lowerAngle + arcAngle)
+            let hueRotation = CGFloat(arc) * unitRotation // will rotate hue circle so degree 180 bisects the arc
 
-            // calculate the percent of the wand within the arc
-            let percentInArc = self.measure(percentOf: transformedWand, satisfying: { pixel in
+            let wandfullness = self.measure(percentOf: transformedWand, satisfying: { pixel in
                 // create an rgba color from the pixel data
-                let blue = CGFloat(pixel >> 24) / 255
-                let green = CGFloat((pixel << 8) >> 24) / 255
-                let red = CGFloat((pixel << 16) >> 24) / 255
+                let blue = CGFloat((pixel << 24) >> 24) / 255
+                let green = CGFloat((pixel << 16) >> 24) / 255
+                let red = CGFloat((pixel << 8) >> 24) / 255
                 let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
 
                 // get the hue of the rgba color
-                var hue: CGFloat = 0;
+                var hue: CGFloat = 0
                 rgba.getHue(&hue, saturation: nil, brightness: nil, alpha: nil)
-                hue = (hue + thirtyDegrees).truncatingRemainder(dividingBy: 1)
 
-                return arcRange.contains(hue)
+                hue = (hue + hueRotation).truncatingRemainder(dividingBy: 1)
+
+                return prelimHueRange.contains(hue)
             }, in: outputImage, ofPixelType: UInt32.self)
 
-            if percentInArc < leastPercentInArc {
-                leastPercentInArc = percentInArc
-                wandlessArc = arc
+            if wandfullness > greatestWandfullness {
+                greatestWandfullness = wandfullness
+                wandfullArc = arc
             }
         }
 
-        // will rotate hue circle so that degree 0 bisects wandlessArc
-        let hueRotation = CGFloat(wandlessArc) * arcAngle
+        // will rotate hue circle so degree 180 bisects the wandfullArc
+        let hueRotation = CGFloat(wandfullArc) * unitRotation
 
-        // calibrate the threshold filter by finding optimal
-        // HSB parameters for the threshold filter's color cube
-        let minActivity: Double = 0.8 // 80 percent <- why this number?
-        let maxPrecision: CGFloat = 1 / 64 // same as the precision of the color cube
-        var parameters: [CGFloat] = [0, 1, 0, 1, 0, 1] // [minH, maxH, minS, maxS, minB, maxB]
+        // configure the threshold filter using the preliminary hue range
+        let prelimColorCube = self.createColorCube(hueRotation: hueRotation, hueRange: prelimHueRange, saturationRange: 0...1, brightnessRange: 0...1)
+        self.thresholdFilter.cubeData = prelimColorCube.data
+        self.thresholdFilter.cubeDimension = prelimColorCube.dimension
 
-        try parameters.indices.forEach({ index in
+        // filter the image
+        let prelimFilteredImage = try self.filter(image: image)
+
+        // calculate the percent of the wand that is active, i.e. not black
+        let prelimActivition = self.measure(percentOf: transformedWand, satisfying: { $0 != 0 }, in: prelimFilteredImage, ofPixelType: UInt8.self)
+
+        // calibrate the HSB parameters used to configure the threshold filter
+        let maxPrecision: CGFloat = 1 / 64 // same as the precision of the color cube?
+        var parameters = [prelimHueRange.lowerBound, prelimHueRange.upperBound, 0, 1, 0, 1] // [minH, maxH, minS, maxS, minB, maxB]
+
+        try parameters.indices.forEach { index in
             let isMinParameter = index % 2 == 0
             var lower = isMinParameter ? parameters[index] : parameters[index - 1]
             var upper = isMinParameter ? parameters[index + 1] : parameters[index]
@@ -246,7 +255,7 @@ public struct WandDetector {
                 let saturationRange = parameters[2]...parameters[3]
                 let brightnessRange = parameters[4]...parameters[5]
 
-                // calibrate the threshold filter
+                // configure the threshold filter
                 let colorCube = self.createColorCube(hueRotation: hueRotation, hueRange: hueRange, saturationRange: saturationRange, brightnessRange: brightnessRange)
                 self.thresholdFilter.cubeData = colorCube.data
                 self.thresholdFilter.cubeDimension = colorCube.dimension
@@ -254,19 +263,43 @@ public struct WandDetector {
                 // filter the image
                 let filteredImage = try self.filter(image: image)
 
-                // calculate the percent of the wand that is active, i.e. not black
-                let percentActive = self.measure(percentOf: transformedWand, satisfying: { $0 != 0 }, in: filteredImage, ofPixelType: UInt8.self)
+                // calculate the percent of the wand that is activated, i.e. not black
+                let activation = self.measure(percentOf: transformedWand, satisfying: { $0 != 0 }, in: filteredImage, ofPixelType: UInt8.self)
 
                 // reduce the search space
-                if percentActive >= minActivity {
+                if activation >= prelimActivition {
                     if isMinParameter { lower = middle }
                     else { upper = middle }
                 } else {
-                    if isMinParameter { upper = middle }
-                    else { lower = middle }
+                    if isMinParameter {
+                        upper = middle
+                        parameters[index] = lower
+                    }
+                    else {
+                        lower = middle
+                        parameters[index] = upper
+                    }
                 }
             }
-        })
+        }
+
+        // configure the threshold filter
+        let hueRange = parameters[0]...parameters[1]
+        let saturationRange = parameters[2]...parameters[3]
+        let brightnessRange = parameters[4]...parameters[5]
+        let colorCube = self.createColorCube(hueRotation: hueRotation, hueRange: hueRange, saturationRange: saturationRange, brightnessRange: brightnessRange)
+        self.thresholdFilter.cubeData = colorCube.data
+        self.thresholdFilter.cubeDimension = colorCube.dimension
+
+//        let f = try self.filter(image: image)
+//        let percentActive = self.measure(percentOf: transformedWand, satisfying: { $0 != 0 }, in: f, ofPixelType: UInt8.self)
+//
+//        print(parameters)
+//        print(percentActive)
+//
+//
+//        return f
+
 
         // if calibration requires the user to position the wand m meters distance from the camera
         // then we can compute the size of the wand at max_m distance and see if that size is >=
@@ -274,38 +307,12 @@ public struct WandDetector {
         // for calibrating the width and height erosion filters
     }
 
-    // MARK: Measurement
-
-    private func measure<T>(percentOf wand: Wand, satisfying condition: (T) -> Bool, in image: CVImageBuffer, ofPixelType type: T.Type) -> Double {
-        return image.withPixelGetter(getting: type) { getPixelAt in
-            // start point
-            let startX = Int((wand.center.x - wand.radius).rounded(.down))
-            let startY = Int((wand.center.y - wand.radius).rounded(.down))
-
-            // end point
-            let diameter = Int((wand.radius * 2).rounded(.up))
-            let endX = startX + diameter
-            let endY = startY + diameter
-
-            var total: Double = 0
-            var passing: Double = 0
-
-            for x in startX...endX {
-                for y in startY...endY {
-                    let point: PixelPoint = (x: x, y: y)
-                    if let pixel = getPixelAt(point) {
-                        let length = sqrt(pow(Double(x) - wand.center.x, 2) + pow(Double(y) - wand.center.y, 2))
-                        if length <= wand.radius {
-                            total += 1
-                            if condition(pixel) { passing += 1 }
-                        }
-                    }
-                }
-            }
-
-            return passing / total
-        }
-    }
+    // MARK: Detection
+    //
+    //
+    //
+    //
+    //
 
     // MARK: Filtration
 
@@ -365,9 +372,42 @@ public struct WandDetector {
         // area according to the number of pixels eroded
     }
 
+    // MARK: Measurement
+
+    private func measure<T>(percentOf wand: Wand, satisfying condition: (T) -> Bool, in image: CVImageBuffer, ofPixelType type: T.Type) -> Double {
+        return image.withPixelGetter(getting: type) { getPixelAt in
+            // start point
+            let startX = Int((wand.center.x - wand.radius).rounded(.down))
+            let startY = Int((wand.center.y - wand.radius).rounded(.down))
+
+            // end point
+            let diameter = Int((wand.radius * 2).rounded(.up))
+            let endX = startX + diameter
+            let endY = startY + diameter
+
+            var total: Double = 0
+            var passing: Double = 0
+
+            for x in startX...endX {
+                for y in startY...endY {
+                    let point: PixelPoint = (x: x, y: y)
+                    if let pixel = getPixelAt(point) {
+                        let length = sqrt(pow(Double(x) - wand.center.x, 2) + pow(Double(y) - wand.center.y, 2))
+                        if length <= wand.radius { // is wand pixel
+                            total += 1
+                            if condition(pixel) { passing += 1 }
+                        }
+                    }
+                }
+            }
+
+            return passing / total
+        }
+    }
+
     // MARK: Color Cube Creation
 
-    private func createColorCube(hueRotation: CGFloat = 0, hueRange: ClosedRange<CGFloat>, saturationRange: ClosedRange<CGFloat>, brightnessRange: ClosedRange<CGFloat>) -> ColorCube {
+    private func createColorCube(hueRotation: CGFloat, hueRange: ClosedRange<CGFloat>, saturationRange: ClosedRange<CGFloat>, brightnessRange: ClosedRange<CGFloat>) -> ColorCube {
         var cube = [Float]()
 
         let size = 64
@@ -409,12 +449,18 @@ public struct WandDetector {
 
 private extension CVImageBuffer {
     func withPixelGetter<T, R>(getting type: T.Type, body: ((PixelPoint) -> T?) -> R) -> R {
+        assert(CVPixelBufferGetPlaneCount(self) == 0)
+
+        // create dimension ranges
         let width = CVPixelBufferGetWidth(self)
         let height = CVPixelBufferGetHeight(self)
-        let bpr = CVPixelBufferGetBytesPerRow(self)
-
         let widthRange = 0..<width
         let heightRange = 0..<height
+
+        // calculate row length
+        let rowBytes = CVPixelBufferGetBytesPerRow(self)
+        let pixelSize = MemoryLayout<T>.size
+        let rowLength = rowBytes / pixelSize
 
         // lock and later unlock
         CVPixelBufferLockBaseAddress(self, .readOnly)
@@ -428,7 +474,7 @@ private extension CVImageBuffer {
         return body { point in
             let (x, y) = point
             let inImage = widthRange.contains(x) && heightRange.contains(y)
-            return inImage ? pixels[x + (y * bpr)] : nil
+            return inImage ? pixels[x + (y * rowLength)] : nil
         }
     }
 }
