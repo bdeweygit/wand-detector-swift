@@ -24,10 +24,10 @@ public struct WandDetector {
     // screen projection size at some standard gameplay distance for that screen
     private let maxOutputImagePixels = 50_000 // <- why?
 
-    private let ROIRectangle: CGRect
     private let context: CIContext
-    private let inputImageSize: ImageSize
+    private let ROIRectangle: CGRect
     private let pool: CVPixelBufferPool
+    private let inputImageSize: ImageSize
     private let transform: CGAffineTransform
     private let thresholdFilter: CIColorCube
     private let binarizationFilter: CIColorPosterize
@@ -129,7 +129,7 @@ public struct WandDetector {
 
         // configure the filters
         binarizationFilter.levels = 2
-        widthErosionFilter.width = 3
+        widthErosionFilter.width = 3 // should this be proportional to maxOutputImagePixels?
         widthErosionFilter.height = 1
         heightErosionFilter.width = 1
         heightErosionFilter.height = 3
@@ -295,7 +295,6 @@ public struct WandDetector {
             for i in 0..<pixels.count { // find the best upper bound
                 if pixels[i].isWand {
                     score += 1; WAC += 1;
-
                     if WAC >= minWAC && score >= bestScore {
                         bestScore = score
                         upper = i
@@ -308,7 +307,6 @@ public struct WandDetector {
             for i in (0...upper).reversed() { // find the best lower bound
                 if pixels[i].isWand {
                     score += 1; WAC += 1;
-
                     if WAC >= minWAC && score >= bestScore {
                         bestScore = score
                         bestWAC = WAC
