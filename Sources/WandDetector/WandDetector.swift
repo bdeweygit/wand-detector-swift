@@ -7,88 +7,86 @@ public typealias Wand = (center: (x: Double, y: Double), radius: Double)
 public typealias ImageRegion = (origin: (x: Int, y: Int), size: ImageSize)
 
 private typealias PixelPoint = (x: Int, y: Int)
-private typealias ColorCube = (data: Data, dimension: Float)
 
 public enum WandDetectorError: Error {
     case invalidWand
     case invalidImage
     case couldNotFilterImage
     case invalidRegionOfInterest
-    case invalidMaxRetainedOutputImages
-    case couldNotCreatePixelBuffer(code: CVReturn)
-    case couldNotCreatePixelBufferPool(code: CVReturn)
+    case invalidOutputImagePoolMinCardinality
+    case couldNotCreateOutputImage(code: CVReturn)
+    case couldNotCreateOutputImagePool(code: CVReturn)
+    case couldNotCreateCalibrationImage(code: CVReturn)
 }
 
 public struct WandDetector {
-    // TODO: calculate minPixels based on some fidelity length and
+    // TODO: calculate maxOutputImagePixels based on some fidelity length and
     // screen projection size at some standard gameplay distance for that screen
-    private let minPixels = 50_000
+    private let maxOutputImagePixels = 50_000 // <- why?
 
-    private let roiRect: CGRect
+    private let ROIRectangle: CGRect
     private let context: CIContext
-    private let inputSize: ImageSize
+    private let inputImageSize: ImageSize
     private let pool: CVPixelBufferPool
     private let transform: CGAffineTransform
     private let thresholdFilter: CIColorCube
     private let binarizationFilter: CIColorPosterize
+    private var widthErosionFilter: CIMorphologyRectangleMinimum
+    private var heightErosionFilter: CIMorphologyRectangleMinimum
     private let squareErosionFilter: CIMorphologyRectangleMinimum
     private let squareDilationFilter: CIMorphologyRectangleMaximum
 
-    private var widthErosionFilter: CIMorphologyRectangleMinimum?
-    private var heightErosionFilter: CIMorphologyRectangleMinimum?
-
     // MARK: Initialization
 
-    public init(inputSize: ImageSize, regionOfInterest roi: ImageRegion, maxRetainedOutputImages maxRetain: Int = 1) throws {
-        // verify maxRetain is positive
-        guard maxRetain > 0 else {
-            throw WandDetectorError.invalidMaxRetainedOutputImages
+    public init(forRegionOfInterest ROI: ImageRegion, inInputImagesOfSize inputImageSize: ImageSize, usingOutputImagePoolMinCardinality minPoolCardinality: Int = 1) throws {
+        // verify output image pool min cardinality is positive
+        guard minPoolCardinality > 0 else {
+            throw WandDetectorError.invalidOutputImagePoolMinCardinality
         }
 
-        // verify roi size is positive
-        guard roi.size.width > 0 && roi.size.height > 0 else {
+        // verify region of interest size is positive
+        guard ROI.size.width > 0 && ROI.size.height > 0 else {
            throw WandDetectorError.invalidRegionOfInterest
         }
 
-        // make CGRects from inputSize and roi
-        let inputSizeRect = CGRect(origin: .zero, size: CGSize(width: inputSize.width, height: inputSize.height))
-        let roiRect = CGRect(origin: CGPoint(x: roi.origin.x, y: roi.origin.y), size: CGSize(width: roi.size.width, height: roi.size.height))
+        // make rectangles from input image size and region of interest
+        let imageSizeRectangle = CGRect(origin: .zero, size: CGSize(width: inputImageSize.width, height: inputImageSize.height))
+        let ROIRectangle = CGRect(origin: CGPoint(x: ROI.origin.x, y: ROI.origin.y), size: CGSize(width: ROI.size.width, height: ROI.size.height))
 
-        // verify inputSizeRect contains roiRect
-        guard inputSizeRect.contains(roiRect) else {
+        // verify input image size contains the region of interest
+        guard imageSizeRectangle.contains(ROIRectangle) else {
             throw WandDetectorError.invalidRegionOfInterest
         }
 
         // create the translation transform
-        let dx = -roiRect.origin.x
-        let dy = -roiRect.origin.y
+        let dx = -ROIRectangle.origin.x
+        let dy = -ROIRectangle.origin.y
         var transform = CGAffineTransform(translationX: dx, y: dy)
 
-        // width and height for the output pixel buffers
-        var outputWidth = roiRect.width
-        var outputHeight = roiRect.height
+        // width and height for the output images
+        var outputImageWidth = ROIRectangle.width
+        var outputImageHeight = ROIRectangle.height
 
-        let outputPixels = outputWidth * outputHeight
-        if outputPixels > CGFloat(minPixels) { // create the downscale transform
-            let downscale = CGFloat(sqrt(Double(minPixels) / Double(outputPixels)))
+        let outputImagePixels = outputImageWidth * outputImageHeight
+        if outputImagePixels > CGFloat(self.maxOutputImagePixels) { // create a downscale transform
+            let downscale = CGFloat(sqrt(Double(self.maxOutputImagePixels) / Double(outputImagePixels)))
 
             // adjust the scale so output width and height will be integers
-            let downscaledRoiRect = roiRect.applying(CGAffineTransform(scaleX: downscale, y: downscale))
-            outputWidth = downscaledRoiRect.width.rounded(.down)
-            outputHeight = downscaledRoiRect.height.rounded(.down)
-
-            let adjustedScaleX = outputWidth / roiRect.width
-            let adjustedScaleY = outputHeight / roiRect.height
+            let downscaledROIRectangle = ROIRectangle.applying(CGAffineTransform(scaleX: downscale, y: downscale))
+            outputImageWidth = downscaledROIRectangle.width.rounded(.down)
+            outputImageHeight = downscaledROIRectangle.height.rounded(.down)
+            let adjustedScaleX = outputImageWidth / ROIRectangle.width
+            let adjustedScaleY = outputImageHeight / ROIRectangle.height
 
             // concatenate with the translation transform
             transform = transform.concatenating(CGAffineTransform(scaleX: adjustedScaleX, y: adjustedScaleY))
         }
 
-        // create the output pixel buffer pool
-        let poolAttributes: NSDictionary = [kCVPixelBufferPoolMinimumBufferCountKey: maxRetain]
+        // create the output image pool
+        let poolAttributes: NSDictionary = [kCVPixelBufferPoolMinimumBufferCountKey: minPoolCardinality]
         let pixelBufferAttributes: NSDictionary = [
-            kCVPixelBufferWidthKey: outputWidth,
-            kCVPixelBufferHeightKey: outputHeight,
+            kCVPixelBufferWidthKey: outputImageWidth,
+            kCVPixelBufferHeightKey: outputImageHeight,
             kCVPixelBufferIOSurfacePropertiesKey: [:],
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_OneComponent8
         ]
@@ -96,21 +94,21 @@ public struct WandDetector {
         var poolOut: CVPixelBufferPool?
         var code = CVPixelBufferPoolCreate(kCFAllocatorDefault, poolAttributes, pixelBufferAttributes, &poolOut)
         guard let pool = poolOut else {
-            throw WandDetectorError.couldNotCreatePixelBufferPool(code: code)
+            throw WandDetectorError.couldNotCreateOutputImagePool(code: code)
         }
 
-        // preallocate maxRetain number of buffers
-        var pixelBufferOut: CVPixelBuffer?
-        var pixelBufferRetainer = [CVPixelBuffer]() // prevents recycling during the below while loop
-        let auxAttributes: NSDictionary = [kCVPixelBufferPoolAllocationThresholdKey: maxRetain]
+        // preallocate minPoolCardinality number of output images
+        var outputImageOut: CVPixelBuffer?
+        var outputImageRetainer = [CVPixelBuffer]() // prevents recycling during the below while loop
+        let auxAttributes: NSDictionary = [kCVPixelBufferPoolAllocationThresholdKey: minPoolCardinality]
 
         code = kCVReturnSuccess
         while code == kCVReturnSuccess {
-            code = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, pool, auxAttributes, &pixelBufferOut)
-            if let pixelBuffer = pixelBufferOut {
-                pixelBufferRetainer.append(pixelBuffer)
+            code = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, pool, auxAttributes, &outputImageOut)
+            if let outputImage = outputImageOut {
+                outputImageRetainer.append(outputImage)
             }
-            pixelBufferOut = nil
+            outputImageOut = nil
         }
 
         assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code \(code)")
@@ -118,188 +116,260 @@ public struct WandDetector {
         // create the context
         let context = CIContext(options: [
             .cacheIntermediates: false,
-            .workingColorSpace: CGColorSpace(name: CGColorSpace.itur_709)!,
+            .workingColorSpace: CGColorSpace(name: CGColorSpace.itur_709)!, // <- why?
         ])
 
         // create the filters
         let thresholdFilter = CIFilter.colorCube()
         let binarizationFilter = CIFilter.colorPosterize()
+        let widthErosionFilter = CIFilter.morphologyRectangleMinimum()
+        let heightErosionFilter = CIFilter.morphologyRectangleMinimum()
         let squareErosionFilter = CIFilter.morphologyRectangleMinimum()
         let squareDilationFilter = CIFilter.morphologyRectangleMaximum()
 
         // configure the filters
         binarizationFilter.levels = 2
+        widthErosionFilter.width = 3
+        widthErosionFilter.height = 1
+        heightErosionFilter.width = 1
+        heightErosionFilter.height = 3
         squareErosionFilter.width = 3
         squareErosionFilter.height = 3
         squareDilationFilter.width = 3
         squareDilationFilter.height = 3
+        thresholdFilter.cubeDimension = 64 // max allowed by CIColorCube
 
         // initialize stored properties
         self.pool = pool
         self.context = context
-        self.roiRect = roiRect
-        self.inputSize = inputSize
         self.transform = transform
+        self.ROIRectangle = ROIRectangle
+        self.inputImageSize = inputImageSize
         self.thresholdFilter = thresholdFilter
         self.binarizationFilter = binarizationFilter
+        self.widthErosionFilter = widthErosionFilter
+        self.heightErosionFilter = heightErosionFilter
         self.squareErosionFilter = squareErosionFilter
         self.squareDilationFilter = squareDilationFilter
     }
 
     // MARK: Calibration
 
-    public func calibrate(using wand: Wand, inRegionOfInterestIn image: CVImageBuffer) throws {
+    public func calibrate(using wand: Wand, deadzoneScale deadzone: Double, minWandActivation minWA: Double, inRegionOfInterestIn image: CVImageBuffer) throws {
         // verify image size is correct
         let width = CVPixelBufferGetWidth(image)
         let height = CVPixelBufferGetHeight(image)
-        guard width == self.inputSize.width && height == self.inputSize.height else {
+        guard width == self.inputImageSize.width && height == self.inputImageSize.height else {
             throw WandDetectorError.invalidImage
         }
 
-        // make a CGRect that bounds the wand
-        let diameter = wand.radius * 2
-        let wandRect = CGRect(origin: CGPoint(x: wand.center.x - wand.radius, y: wand.center.y - wand.radius), size: CGSize(width: diameter, height: diameter))
+        // make a rectangle that bounds the wand
+        let radius = abs(wand.radius)
+        let diameter = radius * 2
+        let wandRectangle = CGRect(origin: CGPoint(x: wand.center.x - radius, y: wand.center.y - radius), size: CGSize(width: diameter, height: diameter))
 
-        assert(wandRect.midX == CGFloat(wand.center.x) && wandRect.midY == CGFloat(wand.center.y), "wandRect is centered incorrectly")
+        assert(wandRectangle.midX == CGFloat(wand.center.x) && wandRectangle.midY == CGFloat(wand.center.y), "wandRectangle is centered incorrectly")
 
-        // verify roiRect contains wandRect
-        guard self.roiRect.contains(wandRect) else {
+        // verify region of interest contains the wand
+        guard self.ROIRectangle.contains(wandRectangle) else {
             throw WandDetectorError.invalidWand
         }
 
-        // create the transformed wand
-        let transformedWandRect = wandRect.applying(self.transform)
-        let transformedWand: Wand = (center: (x: Double(transformedWandRect.midX), y: Double(transformedWandRect.midY)), radius: Double(transformedWandRect.width / 2))
+        // apply the transform to the wand rectangle and create the transformed wand
+        let transformedWandRectangle = wandRectangle.applying(self.transform)
+        let transformedWand: Wand = (center: (x: Double(transformedWandRectangle.midX), y: Double(transformedWandRectangle.midY)), radius: Double(transformedWandRectangle.width / 2))
 
         // crop and transform the image
-        let transformedImage = CIImage(cvImageBuffer: image).cropped(to: self.roiRect).transformed(by: self.transform)
+        let transformedImage = CIImage(cvImageBuffer: image).cropped(to: self.ROIRectangle).transformed(by: self.transform)
 
         // get width and height of transformedImage
-        let transformedImageWidth = Int(transformedImage.extent.width.rounded(.down))
-        let transformedImageHeight = Int(transformedImage.extent.height.rounded(.down))
+        let transformedWidth = Int(transformedImage.extent.width.rounded(.down))
+        let transformedHeight = Int(transformedImage.extent.height.rounded(.down))
 
-        // create the output image to render into
-        var pixelBufferOut: CVPixelBuffer?
-        let code = CVPixelBufferCreate(kCFAllocatorDefault, transformedImageWidth, transformedImageHeight, kCVPixelFormatType_32BGRA, nil, &pixelBufferOut)
-        guard let outputImage = pixelBufferOut else {
-            throw WandDetectorError.couldNotCreatePixelBuffer(code: code)
+        // create the calibration image to render into
+        var calibrationImageOut: CVPixelBuffer?
+        let code = CVPixelBufferCreate(kCFAllocatorDefault, transformedWidth, transformedHeight, kCVPixelFormatType_32BGRA, nil, &calibrationImageOut)
+        guard let calibrationImage = calibrationImageOut else {
+            throw WandDetectorError.couldNotCreateCalibrationImage(code: code)
         }
 
-        // render to the output image
-        self.context.render(transformedImage, to: outputImage)
+        // render to the calibration image using the working color space as the output color space
+        let bounds = CGRect(origin: .zero, size: CGSize(width: transformedWidth, height: transformedHeight))
+        self.context.render(transformedImage, to: calibrationImage, bounds: bounds, colorSpace: self.context.workingColorSpace!)
 
-        // find the arc on the hue circle with the greatest percent of the wand
+        // get calibration image pixels in HSB format
+        var pixels = [(h: CGFloat, s: CGFloat, b: CGFloat, isWand: Bool)]()
+        calibrationImage.withPixelGetter(getting: UInt32.self, { getPixelAt in
+            let width = CVPixelBufferGetWidth(calibrationImage)
+            let height = CVPixelBufferGetHeight(calibrationImage)
+            let deadzoneRadius = transformedWand.radius * abs(deadzone)
+
+            for x in 0..<width {
+                for y in 0..<height {
+                    let point: PixelPoint = (x: x, y: y)
+                    if let pixel = getPixelAt(point) {
+                        // create an rgba color from the pixel bits
+                        let blue = CGFloat((pixel << 24) >> 24) / 255
+                        let green = CGFloat((pixel << 16) >> 24) / 255
+                        let red = CGFloat((pixel << 8) >> 24) / 255
+                        let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
+
+                        // get the HSB values
+                        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
+                        rgba.getHue(&h, saturation: &s, brightness: &b, alpha: nil)
+
+                        // determine if wand pixel
+                        let distanceFromWandCenter = sqrt(pow(Double(x) - transformedWand.center.x, 2) + pow(Double(y) - transformedWand.center.y, 2))
+                        let isWand = distanceFromWandCenter <= transformedWand.radius
+
+                        // ignore background pixels in the deadzone
+                        if !isWand && distanceFromWandCenter <= deadzoneRadius { continue }
+
+                        pixels.append((h, s, b, isWand))
+                    }
+                }
+            }
+        })
+
+        assert(pixels.count > 0)
+
+        // find the arc on the hue circle with the greatest portion of the wand
         var wandfullArc = 0
-        var greatestWandfullness = Double.zero
-        let arcs = 12 // 3 primaries, 3 secondaries, 6 tertiaries
+        var greatestPixelsInAnArc = 0
+        let arcs = 360
         let unitRotation = 1 / CGFloat(arcs)
-        let halfRotation: CGFloat = 180 / 360
+        let halfRotation: CGFloat = 0.5 // 180 degrees
         let halfArcAngle: CGFloat = 30 / 360 // arcs are 60 degrees
-        let prelimHueRange = (halfRotation - halfArcAngle)...(halfRotation + halfArcAngle)
+        let arcRange = (halfRotation - halfArcAngle)...(halfRotation + halfArcAngle)
 
+        var wandPixels = pixels.filter({ $0.isWand })
         for arc in 0..<arcs {
             let hueRotation = CGFloat(arc) * unitRotation // will rotate hue circle so degree 180 bisects the arc
 
-            let wandfullness = self.measure(percentOf: transformedWand, satisfying: { pixel in
-                // create an rgba color from the pixel data
-                let blue = CGFloat((pixel << 24) >> 24) / 255
-                let green = CGFloat((pixel << 16) >> 24) / 255
-                let red = CGFloat((pixel << 8) >> 24) / 255
-                let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
+            let pixelsInArc = wandPixels.filter({ arcRange.contains($0.h.rotated(by: hueRotation)) }).count
 
-                // get the hue of the rgba color
-                var hue: CGFloat = 0
-                rgba.getHue(&hue, saturation: nil, brightness: nil, alpha: nil)
-
-                hue = (hue + hueRotation).truncatingRemainder(dividingBy: 1)
-
-                return prelimHueRange.contains(hue)
-            }, in: outputImage, ofPixelType: UInt32.self)
-
-            if wandfullness > greatestWandfullness {
-                greatestWandfullness = wandfullness
+            if pixelsInArc > greatestPixelsInAnArc {
+                greatestPixelsInAnArc = pixelsInArc
                 wandfullArc = arc
             }
         }
 
-        // will rotate hue circle so degree 180 bisects the wandfullArc
+        // rotate the hue values and filter for pixels that are in wandfullArc
         let hueRotation = CGFloat(wandfullArc) * unitRotation
+        pixels = pixels.map({ ($0.h.rotated(by: hueRotation), $0.s, $0.b, $0.isWand) }).filter({ arcRange.contains($0.h) })
 
-        // configure the threshold filter using the preliminary hue range
-        let prelimColorCube = self.createColorCube(hueRotation: hueRotation, hueRange: prelimHueRange, saturationRange: 0...1, brightnessRange: 0...1)
-        self.thresholdFilter.cubeData = prelimColorCube.data
-        self.thresholdFilter.cubeDimension = prelimColorCube.dimension
+        assert(pixels.count > 0)
 
-        // filter the image
-        let prelimFilteredImage = try self.filter(image: image)
+        // create wandfull HSB ranges
+        wandPixels = pixels.filter({ $0.isWand })
+        wandPixels.sort(by: { $0.h < $1.h })
+        let wandfullHueRange = wandPixels.first!.h...wandPixels.last!.h
+        wandPixels.sort(by: { $0.s < $1.s })
+        let wandfullSaturationRange = wandPixels.first!.s...wandPixels.last!.s
+        wandPixels.sort(by: { $0.b < $1.b })
+        let wandfullBrightnessRange = wandPixels.first!.b...wandPixels.last!.b
 
-        // calculate the percent of the wand that is active, i.e. not black
-        let prelimActivition = self.measure(percentOf: transformedWand, satisfying: { $0 != 0 }, in: prelimFilteredImage, ofPixelType: UInt8.self)
+        // filter for pixels that are in wandfull HSB ranges
+        pixels = pixels.filter({ wandfullHueRange.contains($0.h) && wandfullSaturationRange.contains($0.s) && wandfullBrightnessRange.contains($0.b) })
 
-        // calibrate the HSB parameters used to configure the threshold filter
-        let maxPrecision: CGFloat = 1 / 64 // same as the precision of the color cube?
-        var parameters = [prelimHueRange.lowerBound, prelimHueRange.upperBound, 0, 1, 0, 1] // [minH, maxH, minS, maxS, minB, maxB]
+        assert(pixels.count > 0)
 
-        try parameters.indices.forEach { index in
-            let isMinParameter = index % 2 == 0
-            var lower = isMinParameter ? parameters[index] : parameters[index - 1]
-            var upper = isMinParameter ? parameters[index + 1] : parameters[index]
+        // get min wand activation pixel count
+        let clampedMinWA = minWA.clamped(to: 0.nextUp...1)
+        let minWAC = Int((Double(wandPixels.count) * clampedMinWA).rounded(.up))
 
-            // binary search the optimal value of parameters[index]
-            while (upper - lower) > maxPrecision {
-                let middle = (lower + upper) / 2
-                parameters[index] = middle
+        // create HSB range combinations where only one range is optimized
+        var rangeCombos = [(score: Int, WAC: Int, hueRange: ClosedRange<CGFloat>, saturationRange: ClosedRange<CGFloat>, brightnessRange: ClosedRange<CGFloat>)]()
+        for i in 0..<3 {
+            switch i {
+            case 0:
+                pixels.sort(by: { $0.h < $1.h })
+            case 1:
+                pixels.sort(by: { $0.s < $1.s })
+            default:
+                pixels.sort(by: { $0.b < $1.b })
+            }
 
-                // create HSB ranges
-                let hueRange = parameters[0]...parameters[1]
-                let saturationRange = parameters[2]...parameters[3]
-                let brightnessRange = parameters[4]...parameters[5]
+            var upper = 0, lower = 0
+            var bestScore = Int.min, score = 0, WAC = 0
+            for i in 0..<pixels.count { // find the best upper bound
+                if pixels[i].isWand {
+                    score += 1; WAC += 1;
 
-                // configure the threshold filter
-                let colorCube = self.createColorCube(hueRotation: hueRotation, hueRange: hueRange, saturationRange: saturationRange, brightnessRange: brightnessRange)
-                self.thresholdFilter.cubeData = colorCube.data
-                self.thresholdFilter.cubeDimension = colorCube.dimension
-
-                // filter the image
-                let filteredImage = try self.filter(image: image)
-
-                // calculate the percent of the wand that is activated, i.e. not black
-                let activation = self.measure(percentOf: transformedWand, satisfying: { $0 != 0 }, in: filteredImage, ofPixelType: UInt8.self)
-
-                // reduce the search space
-                if activation >= prelimActivition {
-                    if isMinParameter { lower = middle }
-                    else { upper = middle }
-                } else {
-                    if isMinParameter {
-                        upper = middle
-                        parameters[index] = lower
+                    if WAC >= minWAC && score >= bestScore {
+                        bestScore = score
+                        upper = i
                     }
-                    else {
-                        lower = middle
-                        parameters[index] = upper
+                } else { score -= 1 }
+            }
+
+            var bestWAC = 0
+            bestScore = Int.min; score = 0; WAC = 0
+            for i in (0...upper).reversed() { // find the best lower bound
+                if pixels[i].isWand {
+                    score += 1; WAC += 1;
+
+                    if WAC >= minWAC && score >= bestScore {
+                        bestScore = score
+                        bestWAC = WAC
+                        lower = i
                     }
+                } else { score -= 1 }
+            }
+
+            switch i {
+            case 0:
+                rangeCombos.append((bestScore, bestWAC, pixels[lower].h...pixels[upper].h, wandfullSaturationRange, wandfullBrightnessRange))
+            case 1:
+                rangeCombos.append((bestScore, bestWAC, wandfullHueRange, pixels[lower].s...pixels[upper].s, wandfullBrightnessRange))
+            default:
+                rangeCombos.append((bestScore, bestWAC, wandfullHueRange, wandfullSaturationRange, pixels[lower].b...pixels[upper].b))
+            }
+        }
+
+        // get HSB ranges from the highest scoring range combo using WAC as a tie breaker
+        var bestRangeCombo = rangeCombos.max(by: { $0.score < $1.score })!
+        bestRangeCombo = rangeCombos.first(where: { $0.score == bestRangeCombo.score && $0.WAC > bestRangeCombo.WAC }) ?? bestRangeCombo
+        let hueRange = bestRangeCombo.hueRange
+        let saturationRange = bestRangeCombo.saturationRange
+        let brightnessRange = bestRangeCombo.brightnessRange
+
+        // create color cube data
+        var colorCube = [Float]()
+        let dimension = Int(self.thresholdFilter.cubeDimension - 1)
+        for b in 0...dimension {
+            let blue = CGFloat(b) / CGFloat(dimension)
+            for g in 0...dimension {
+                let green = CGFloat(g) / CGFloat(dimension)
+                for r in 0...dimension {
+                    let red = CGFloat(r) / CGFloat(dimension)
+
+                    // create an rgba color
+                    let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
+
+                    // get the HSB values
+                    var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
+                    rgba.getHue(&h, saturation: &s, brightness: &b, alpha: nil)
+                    h = h.rotated(by: hueRotation)
+
+                    // use white color if all HSB values are in range, black otherwise
+                    let color: Float =
+                        hueRange.contains(h) &&
+                        saturationRange.contains(s) &&
+                        brightnessRange.contains(b) ? 1 : 0
+
+                    colorCube.append(color) // red
+                    colorCube.append(color) // green
+                    colorCube.append(color) // blue
+                    colorCube.append(1)     // alpha
                 }
             }
         }
 
+        let colorCubeData = colorCube.withUnsafeBufferPointer({ buffer in Data(buffer: buffer) })
+
         // configure the threshold filter
-        let hueRange = parameters[0]...parameters[1]
-        let saturationRange = parameters[2]...parameters[3]
-        let brightnessRange = parameters[4]...parameters[5]
-        let colorCube = self.createColorCube(hueRotation: hueRotation, hueRange: hueRange, saturationRange: saturationRange, brightnessRange: brightnessRange)
-        self.thresholdFilter.cubeData = colorCube.data
-        self.thresholdFilter.cubeDimension = colorCube.dimension
-
-//        let f = try self.filter(image: image)
-//        let percentActive = self.measure(percentOf: transformedWand, satisfying: { $0 != 0 }, in: f, ofPixelType: UInt8.self)
-//
-//        print(parameters)
-//        print(percentActive)
-//
-//
-//        return f
-
+        self.thresholdFilter.cubeData = colorCubeData
 
         // if calibration requires the user to position the wand m meters distance from the camera
         // then we can compute the size of the wand at max_m distance and see if that size is >=
@@ -307,18 +377,24 @@ public struct WandDetector {
         // for calibrating the width and height erosion filters
     }
 
-    // MARK: Detection
-    //
-    //
-    //
-    //
-    //
+//    // MARK: Detection
+//
+//    public func detect(inRegionOfInterestIn image: CVImageBuffer) throws -> CVImageBuffer {
+//        // verify image size is correct
+//        let width = CVPixelBufferGetWidth(image)
+//        let height = CVPixelBufferGetHeight(image)
+//        guard width == self.inputImageSize.width && height == self.inputImageSize.height else {
+//            throw WandDetectorError.invalidImage
+//        }
+//
+//        return try self.filter(image: image)
+//    }
 
     // MARK: Filtration
 
     private func filter(image: CVImageBuffer) throws -> CVImageBuffer {
         // crop
-        let cropped = CIImage(cvImageBuffer: image).cropped(to: self.roiRect)
+        let cropped = CIImage(cvImageBuffer: image).cropped(to: self.ROIRectangle)
 
         // transform
         let transformed = cropped.transformed(by: self.transform)
@@ -342,24 +418,24 @@ public struct WandDetector {
         self.squareErosionFilter.inputImage = squareDilated
         let squareEroded = self.squareErosionFilter.outputImage
 
-        // maybe width erode
-        self.widthErosionFilter?.inputImage = squareEroded
-        let widthEroded = self.widthErosionFilter?.outputImage
+        // width erode
+        self.widthErosionFilter.inputImage = squareEroded
+        let widthEroded = self.widthErosionFilter.outputImage
 
-        // maybe height erode
-        self.heightErosionFilter?.inputImage = widthEroded
-        let heightEroded = self.heightErosionFilter?.outputImage
+        // height erode
+        self.heightErosionFilter.inputImage = widthEroded
+        let heightEroded = self.heightErosionFilter.outputImage
 
         // unwrap
-        guard let filtered = heightEroded ?? squareEroded else {
+        guard let filtered = heightEroded else {
             throw WandDetectorError.couldNotFilterImage
         }
 
         // create the output image to render into
-        var pixelBufferOut: CVPixelBuffer?
-        let code = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, self.pool, &pixelBufferOut)
-        guard let outputImage = pixelBufferOut else {
-            throw WandDetectorError.couldNotCreatePixelBuffer(code: code)
+        var outputImageOut: CVPixelBuffer?
+        let code = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, self.pool, &outputImageOut)
+        guard let outputImage = outputImageOut else {
+            throw WandDetectorError.couldNotCreateOutputImage(code: code)
         }
 
         // render to the output image
@@ -371,84 +447,12 @@ public struct WandDetector {
         // when contour tracing don't forget to correct wand's
         // area according to the number of pixels eroded
     }
-
-    // MARK: Measurement
-
-    private func measure<T>(percentOf wand: Wand, satisfying condition: (T) -> Bool, in image: CVImageBuffer, ofPixelType type: T.Type) -> Double {
-        return image.withPixelGetter(getting: type) { getPixelAt in
-            // start point
-            let startX = Int((wand.center.x - wand.radius).rounded(.down))
-            let startY = Int((wand.center.y - wand.radius).rounded(.down))
-
-            // end point
-            let diameter = Int((wand.radius * 2).rounded(.up))
-            let endX = startX + diameter
-            let endY = startY + diameter
-
-            var total: Double = 0
-            var passing: Double = 0
-
-            for x in startX...endX {
-                for y in startY...endY {
-                    let point: PixelPoint = (x: x, y: y)
-                    if let pixel = getPixelAt(point) {
-                        let length = sqrt(pow(Double(x) - wand.center.x, 2) + pow(Double(y) - wand.center.y, 2))
-                        if length <= wand.radius { // is wand pixel
-                            total += 1
-                            if condition(pixel) { passing += 1 }
-                        }
-                    }
-                }
-            }
-
-            return passing / total
-        }
-    }
-
-    // MARK: Color Cube Creation
-
-    private func createColorCube(hueRotation: CGFloat, hueRange: ClosedRange<CGFloat>, saturationRange: ClosedRange<CGFloat>, brightnessRange: ClosedRange<CGFloat>) -> ColorCube {
-        var cube = [Float]()
-
-        let size = 64
-        let dimension = Float(size)
-
-        for z in 0 ..< size {
-            let blue = CGFloat(z) / CGFloat(size-1)
-            for y in 0 ..< size {
-                let green = CGFloat(y) / CGFloat(size-1)
-                for x in 0 ..< size {
-                    let red = CGFloat(x) / CGFloat(size-1)
-
-                    let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
-
-                    var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0
-                    rgba.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
-                    hue = (hue + hueRotation).truncatingRemainder(dividingBy: 1)
-
-                    let color: Float =
-                        hueRange.contains(hue) &&
-                        saturationRange.contains(saturation) &&
-                        brightnessRange.contains(brightness) ? 1 : 0
-
-                    cube.append(color) // red
-                    cube.append(color) // green
-                    cube.append(color) // blue
-                    cube.append(1)     // alpha
-                }
-            }
-        }
-
-        let data = cube.withUnsafeBufferPointer { buffer in Data(buffer: buffer) }
-
-        return (data: data, dimension: dimension)
-    }
 }
 
 // MARK: Extensions
 
 private extension CVImageBuffer {
-    func withPixelGetter<T, R>(getting type: T.Type, body: ((PixelPoint) -> T?) -> R) -> R {
+    func withPixelGetter<T, R>(getting type: T.Type, _ body: ((PixelPoint) -> T?) -> R) -> R {
         assert(CVPixelBufferGetPlaneCount(self) == 0)
 
         // create dimension ranges
@@ -470,11 +474,23 @@ private extension CVImageBuffer {
         let baseAddress = CVPixelBufferGetBaseAddress(self)
         let pixels = unsafeBitCast(baseAddress, to: UnsafePointer<T>.self)
 
-        // call body with a getter function
-        return body { point in
-            let (x, y) = point
+        // call body with a pixel getter function
+        return body({ pixelPoint in
+            let (x, y) = pixelPoint
             let inImage = widthRange.contains(x) && heightRange.contains(y)
             return inImage ? pixels[x + (y * rowLength)] : nil
-        }
+        })
+    }
+}
+
+private extension CGFloat {
+    func rotated(by rotation: CGFloat) -> CGFloat {
+        return (self + rotation).truncatingRemainder(dividingBy: 1)
+    }
+}
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        return max(range.lowerBound, min(self, range.upperBound))
     }
 }
