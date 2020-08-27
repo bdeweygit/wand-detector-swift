@@ -1,6 +1,13 @@
 import CoreImage
-import UIKit.UIColor
 import CoreImage.CIFilterBuiltins
+
+#if os(iOS) || os(tvOS)
+import UIKit.UIColor
+private typealias Color = UIColor
+#elseif os(macOS)
+import AppKit.NSColor
+private typealias Color = NSColor
+#endif
 
 public typealias ImageSize = (width: Int, height: Int)
 public typealias Wand = (center: (x: Double, y: Double), radius: Double)
@@ -206,13 +213,13 @@ public struct WandDetector {
 
             for x in 0..<width {
                 for y in 0..<height {
-                    let point: PixelPoint = (x: x, y: y)
-                    if let pixel = getPixelAt(point) {
+                    if let pixel = getPixelAt((x, y)) {
                         // create an rgba color from the pixel bits
                         let blue = CGFloat((pixel << 24) >> 24) / 255
                         let green = CGFloat((pixel << 16) >> 24) / 255
                         let red = CGFloat((pixel << 8) >> 24) / 255
-                        let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
+
+                        let rgba = Color(red: red, green: green, blue: blue, alpha: 1)
 
                         // get the HSB values
                         var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
@@ -343,7 +350,7 @@ public struct WandDetector {
                     let red = CGFloat(r) / CGFloat(dimension)
 
                     // create an rgba color
-                    let rgba = UIColor(red: red, green: green, blue: blue, alpha: 1)
+                    let rgba = Color(red: red, green: green, blue: blue, alpha: 1)
 
                     // get the HSB values
                     var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
@@ -375,18 +382,18 @@ public struct WandDetector {
         // for calibrating the width and height erosion filters
     }
 
-//    // MARK: Detection
-//
-//    public func detect(inRegionOfInterestIn image: CVImageBuffer) throws -> CVImageBuffer {
-//        // verify image size is correct
-//        let width = CVPixelBufferGetWidth(image)
-//        let height = CVPixelBufferGetHeight(image)
-//        guard width == self.inputImageSize.width && height == self.inputImageSize.height else {
-//            throw WandDetectorError.invalidImage
-//        }
-//
-//        return try self.filter(image: image)
-//    }
+    // MARK: Detection
+
+    public func detect(inRegionOfInterestIn image: CVImageBuffer) throws -> CVImageBuffer {
+        // verify image size is correct
+        let width = CVPixelBufferGetWidth(image)
+        let height = CVPixelBufferGetHeight(image)
+        guard width == self.inputImageSize.width && height == self.inputImageSize.height else {
+            throw WandDetectorError.invalidImage
+        }
+
+        return try self.filter(image: image)
+    }
 
     // MARK: Filtration
 
@@ -473,8 +480,7 @@ private extension CVImageBuffer {
         let pixels = unsafeBitCast(baseAddress, to: UnsafePointer<T>.self)
 
         // call body with a pixel getter function
-        return body({ pixelPoint in
-            let (x, y) = pixelPoint
+        return body({ (x, y) in
             let inImage = widthRange.contains(x) && heightRange.contains(y)
             return inImage ? pixels[x + (y * rowLength)] : nil
         })

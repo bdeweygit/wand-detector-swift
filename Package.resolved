@@ -1,0 +1,16 @@
+{
+  "object": {
+    "pins": [
+      {
+        "package": "ContourTracer",
+        "repositoryURL": "https://github.com/bdeweygit/contour-tracer-swift.git",
+        "state": {
+          "branch": "master",
+          "revision": "3950e14f24ca1dc182a7b6716ee3d10db5d43855",
+          "version": null
+        }
+      }
+    ]
+  },
+  "version": 1
+}
