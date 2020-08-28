@@ -1,19 +1,18 @@
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import ContourTracer
 
 #if os(iOS) || os(tvOS)
 import UIKit.UIColor
-private typealias Color = UIColor
+typealias Color = UIColor
 #elseif os(macOS)
 import AppKit.NSColor
-private typealias Color = NSColor
+typealias Color = NSColor
 #endif
 
-public typealias ImageSize = (width: Int, height: Int)
+public typealias ImageSize = ContourTracer.ImageSize
 public typealias Wand = (center: (x: Double, y: Double), radius: Double)
 public typealias ImageRegion = (origin: (x: Int, y: Int), size: ImageSize)
-
-private typealias PixelPoint = (x: Int, y: Int)
 
 public enum WandDetectorError: Error {
     case invalidWand
@@ -45,7 +44,7 @@ public struct WandDetector {
 
     // MARK: Initialization
 
-    public init(forRegionOfInterest ROI: ImageRegion, inInputImagesOfSize inputImageSize: ImageSize, usingOutputImagePoolMinCardinality minPoolCardinality: Int = 1) throws {
+    public init(regionOfInterest ROI: ImageRegion, inputImageSize: ImageSize, outputImagePoolMinCardinality minPoolCardinality: Int = 1) throws {
         // verify output image pool min cardinality is positive
         guard minPoolCardinality > 0 else {
             throw WandDetectorError.invalidOutputImagePoolMinCardinality
@@ -162,7 +161,7 @@ public struct WandDetector {
 
     // MARK: Calibration
 
-    public func calibrate(using wand: Wand, deadzoneScale deadzone: Double, minWandActivation minWA: Double, inRegionOfInterestIn image: CVImageBuffer) throws {
+    public func calibrateUsing(_ wand: Wand, deadzoneScale deadzone: Double, minWandActivation minWA: Double, inRegionOfInterestIn image: CVImageBuffer) throws {
         // verify image size is correct
         let width = CVPixelBufferGetWidth(image)
         let height = CVPixelBufferGetHeight(image)
@@ -206,7 +205,7 @@ public struct WandDetector {
 
         // get calibration image pixels in HSB format
         var pixels = [(h: CGFloat, s: CGFloat, b: CGFloat, isWand: Bool)]()
-        calibrationImage.withPixelGetter(getting: UInt32.self, { getPixelAt in
+        calibrationImage.withPixelGetter({ getPixelAt in
             let width = CVPixelBufferGetWidth(calibrationImage)
             let height = CVPixelBufferGetHeight(calibrationImage)
             let deadzoneRadius = transformedWand.radius * abs(deadzone)
@@ -236,7 +235,7 @@ public struct WandDetector {
                     }
                 }
             }
-        })
+        }, getting: UInt32.self)
 
         assert(pixels.count > 0)
 
@@ -253,7 +252,7 @@ public struct WandDetector {
         for arc in 0..<arcs {
             let hueRotation = CGFloat(arc) * unitRotation // will rotate hue circle so degree 180 bisects the arc
 
-            let pixelsInArc = wandPixels.filter({ arcRange.contains($0.h.rotated(by: hueRotation)) }).count
+            let pixelsInArc = wandPixels.filter({ arcRange.contains($0.h.rotatedBy(hueRotation)) }).count
 
             if pixelsInArc > greatestPixelsInAnArc {
                 greatestPixelsInAnArc = pixelsInArc
@@ -263,7 +262,7 @@ public struct WandDetector {
 
         // rotate the hue values and filter for pixels that are in wandfullArc
         let hueRotation = CGFloat(wandfullArc) * unitRotation
-        pixels = pixels.map({ ($0.h.rotated(by: hueRotation), $0.s, $0.b, $0.isWand) }).filter({ arcRange.contains($0.h) })
+        pixels = pixels.map({ ($0.h.rotatedBy(hueRotation), $0.s, $0.b, $0.isWand) }).filter({ arcRange.contains($0.h) })
 
         assert(pixels.count > 0)
 
@@ -282,7 +281,7 @@ public struct WandDetector {
         assert(pixels.count > 0)
 
         // get min wand activation pixel count
-        let clampedMinWA = minWA.clamped(to: 0.nextUp...1)
+        let clampedMinWA = minWA.clampedTo(0.nextUp...1)
         let minWAC = Int((Double(wandPixels.count) * clampedMinWA).rounded(.up))
 
         // create HSB range combinations where only one range is optimized
@@ -355,7 +354,7 @@ public struct WandDetector {
                     // get the HSB values
                     var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
                     rgba.getHue(&h, saturation: &s, brightness: &b, alpha: nil)
-                    h = h.rotated(by: hueRotation)
+                    h = h.rotatedBy(hueRotation)
 
                     // use white color if all HSB values are in range, black otherwise
                     let color: Float =
@@ -382,22 +381,34 @@ public struct WandDetector {
         // for calibrating the width and height erosion filters
     }
 
-    // MARK: Detection
-
-    public func detect(inRegionOfInterestIn image: CVImageBuffer) throws -> CVImageBuffer {
-        // verify image size is correct
-        let width = CVPixelBufferGetWidth(image)
-        let height = CVPixelBufferGetHeight(image)
-        guard width == self.inputImageSize.width && height == self.inputImageSize.height else {
-            throw WandDetectorError.invalidImage
-        }
-
-        return try self.filter(image: image)
-    }
+//    // MARK: Detection
+//
+//    public func detectInRegionOfInterestIn(_ image: CVImageBuffer) throws -> CVImageBuffer {
+//        // verify image size is correct
+//        let width = CVPixelBufferGetWidth(image)
+//        let height = CVPixelBufferGetHeight(image)
+//        guard width == self.inputImageSize.width && height == self.inputImageSize.height else {
+//            throw WandDetectorError.invalidImage
+//        }
+//
+//        let filtered = try self.filter(image)
+//
+//        filtered.withPixelGetter({ getPixelAt in
+//            let width = CVPixelBufferGetWidth(filtered)
+//            let height = CVPixelBufferGetHeight(filtered)
+//
+//            traceContoursOnImageOfSize((width, height), { point in
+//                guard let pixel = getPixelAt(point) else { return false }
+//                return pixel != 0
+//            })
+//        }, getting: UInt8.self)
+//
+//        return filtered
+//    }
 
     // MARK: Filtration
 
-    private func filter(image: CVImageBuffer) throws -> CVImageBuffer {
+    private func filter(_ image: CVImageBuffer) throws -> CVImageBuffer {
         // crop
         let cropped = CIImage(cvImageBuffer: image).cropped(to: self.ROIRectangle)
 
@@ -456,8 +467,8 @@ public struct WandDetector {
 
 // MARK: Extensions
 
-private extension CVImageBuffer {
-    func withPixelGetter<T, R>(getting type: T.Type, _ body: ((PixelPoint) -> T?) -> R) -> R {
+extension CVImageBuffer {
+    func withPixelGetter<T, R>(_ body: ((PixelPoint) -> T?) -> R, getting type: T.Type) -> R {
         assert(CVPixelBufferGetPlaneCount(self) == 0)
 
         // create dimension ranges
@@ -487,14 +498,14 @@ private extension CVImageBuffer {
     }
 }
 
-private extension CGFloat {
-    func rotated(by rotation: CGFloat) -> CGFloat {
+extension CGFloat {
+    func rotatedBy(_ rotation: CGFloat) -> CGFloat {
         return (self + rotation).truncatingRemainder(dividingBy: 1)
     }
 }
 
-private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
+extension Comparable {
+    func clampedTo(_ range: ClosedRange<Self>) -> Self {
         return max(range.lowerBound, min(self, range.upperBound))
     }
 }
