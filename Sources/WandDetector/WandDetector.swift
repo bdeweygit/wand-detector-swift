@@ -30,13 +30,13 @@ public struct WandDetector {
     // screen projection size at some standard gameplay distance for that screen
     private let maxOutputImagePixels = 50_000 // <- why?
 
+    private let rowStride: Int
     private let imageSize: CGSize
     private let context: CIContext
     private let ROIRectangle: CGRect
     private let pool: CVPixelBufferPool
     private let transform: CGAffineTransform
     private let thresholdFilter: CIColorCube
-    private let minDetectableWandRadius: Double
     private let binarizationFilter: CIColorPosterize
     private var widthErosionFilter: CIMorphologyRectangleMinimum
     private var heightErosionFilter: CIMorphologyRectangleMinimum
@@ -62,7 +62,7 @@ public struct WandDetector {
         let wandDiameter = wand.radius * 2
         let wandRectangle = CGRect(origin: CGPoint(x: wand.center.x - wand.radius, y: wand.center.y - wand.radius), size: CGSize(width: wandDiameter, height: wandDiameter))
 
-        assert(wandRectangle.midX == CGFloat(wand.center.x) && wandRectangle.midY == CGFloat(wand.center.y), "wandRectangle is centered incorrectly")
+        assert(wandRectangle.midX.rounded() == CGFloat(wand.center.x).rounded() && wandRectangle.midY.rounded() == CGFloat(wand.center.y).rounded(), "wandRectangle is centered incorrectly")
 
         // make rectangle from min wand radius
         let minWandDiameter = minWandRadius * 2
@@ -116,9 +116,9 @@ public struct WandDetector {
         let transformedWandRectangle = wandRectangle.applying(transform)
         let transformedWand: Wand = (center: (x: Double(transformedWandRectangle.midX), y: Double(transformedWandRectangle.midY)), radius: Double(transformedWandRectangle.width / 2))
 
-        // transform min wand to get the min detectable wand radius
+        // transform min wand to get the row stride
         let transformedMinWandRectangle = minWandRectangle.applying(transform)
-        let minDetectableWandRadius = Double(transformedMinWandRectangle.width / 2)
+        let rowStride = Int(transformedMinWandRectangle.width.rounded(.down)).clampedTo(1...Int.max)
 
         // crop image to region of interest and transform
         let transformedImage = CIImage(cvImageBuffer: image).cropped(to: ROIRectangle).transformed(by: transform)
@@ -367,6 +367,7 @@ public struct WandDetector {
         self.pool = pool
         self.context = context
         self.transform = transform
+        self.rowStride = rowStride
         self.imageSize = imageSize
         self.ROIRectangle = ROIRectangle
         self.thresholdFilter = thresholdFilter
@@ -375,38 +376,72 @@ public struct WandDetector {
         self.heightErosionFilter = heightErosionFilter
         self.squareErosionFilter = squareErosionFilter
         self.squareDilationFilter = squareDilationFilter
-        self.minDetectableWandRadius = minDetectableWandRadius
     }
 
     // MARK: Detection
 
-//    public func detectInRegionOfInterestIn(_ image: CVImageBuffer) throws -> CVImageBuffer {
-//        // verify image size is correct
-//        guard CVImageBufferGetEncodedSize(image).equalTo(self.imageSize) else {
-//            throw WandDetectorError.invalidImage
-//        }
-//
-//        let filtered = try self.filter(image)
-//
-//        filtered.withPixelGetter({ getPixelAt in
-//            let width = CVPixelBufferGetWidth(filtered)
-//            let height = CVPixelBufferGetHeight(filtered)
-//
-//            traceContoursInImageOfSize(
-//                (width, height),
-//                isActiveAt: { point in
-//                    guard let pixel = getPixelAt(point) else { return false }
-//                    return pixel != 0
-//                },
-//                shouldSkipRow: { $0 % 2 == 0},
-//                shouldStopAfterTracingContour: { contour in
-//
-//            })
-//
-//        }, getting: UInt8.self)
-//
-//        return filtered
-//    }
+    public func detectInRegionOfInterestIn(_ image: CVImageBuffer, shouldContinueAfterDetectingWand: (Wand) -> Bool) throws -> CVImageBuffer {
+        // verify image size is correct
+        guard CVImageBufferGetEncodedSize(image).equalTo(self.imageSize) else {
+            throw WandDetectorError.invalidImage
+        }
+
+        // filter the image
+        let filtered = try self.filter(image)
+
+        // trace contours of wands
+        filtered.withPixelGetter({ getPixelAt in
+            let width = CVPixelBufferGetWidth(filtered)
+            let height = CVPixelBufferGetHeight(filtered)
+
+            traceContoursInImageOfSize(
+                (width, height),
+                isActiveAt: { point in
+                    guard let pixel = getPixelAt(point) else { return false }
+                    return pixel != 0
+                },
+                shouldScanRow: { $0 % self.rowStride == 0 },
+                shouldContinueAfterTracingContour: { contour in
+                    if contour.count <= 3 { // contour encloses no area
+                        return true
+                    }
+
+                    // calculate the enclosed area
+                    var doubleArea = (contour.last!.x * contour.first!.y) - (contour.last!.y * contour.first!.x);
+                    for i in 0..<(contour.count - 1) {
+                        doubleArea += (contour[i].x * contour[i + 1].y) - (contour[i].y * contour[i + 1].x)
+                    }
+
+                    if doubleArea == 0 { // contour encloses no area
+                        return true
+                    }
+
+                    let area = Double(abs(doubleArea)) / 2
+
+                    // calculate the wand radius
+                    let radius = sqrt(area / .pi)
+
+                    // calculate the wand center
+                    let (sumX, sumY) = contour.reduce((0, 0), { ($0.0 + $1.x, $0.1 + $1.y) })
+                    let x = Double(sumX) / Double(contour.count), y = Double(sumY) / Double(contour.count)
+
+                    // make rectangle from wand
+                    let diameter = radius * 2
+                    let wandRectangle = CGRect(origin: CGPoint(x: x - radius, y: y - radius), size: CGSize(width: diameter, height: diameter))
+
+                    assert(wandRectangle.midX.rounded() == CGFloat(x).rounded() && wandRectangle.midY.rounded() == CGFloat(y).rounded(), "wandRectangle is centered incorrectly")
+
+                    // untransform the wand
+                    let untransformedWandRectangle = wandRectangle.applying(self.transform.inverted())
+                    let untransformedWand: Wand = (center: (x: Double(untransformedWandRectangle.midX), y: Double(untransformedWandRectangle.midY)), radius: Double(untransformedWandRectangle.width / 2))
+
+                    return shouldContinueAfterDetectingWand(untransformedWand)
+            })
+
+        }, getting: UInt8.self)
+
+        return filtered
+    }
 
     // MARK: Filtration
 
