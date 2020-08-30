@@ -380,7 +380,7 @@ public struct WandDetector {
 
     // MARK: Detection
 
-    public func detectInRegionOfInterestIn(_ image: CVImageBuffer, shouldContinueAfterDetectingWand: (Wand) -> Bool) throws -> CVImageBuffer {
+    public func detectIn(_ image: CVImageBuffer, shouldContinueAfterDetecting: (Wand) -> Bool) throws -> CVImageBuffer {
         // verify image size is correct
         guard CVImageBufferGetEncodedSize(image).equalTo(self.imageSize) else {
             throw WandDetectorError.invalidImage
@@ -389,41 +389,25 @@ public struct WandDetector {
         // filter the image
         let filtered = try self.filter(image)
 
-        // trace contours of wands
+        // detect wands by contour tracing
         filtered.withPixelGetter({ getPixelAt in
             let width = CVPixelBufferGetWidth(filtered)
             let height = CVPixelBufferGetHeight(filtered)
 
-            traceContoursInImageOfSize(
+            traceInImageOfSize(
                 (width, height),
                 isActiveAt: { point in
                     guard let pixel = getPixelAt(point) else { return false }
                     return pixel != 0
                 },
                 shouldScanRow: { $0 % self.rowStride == 0 },
-                shouldContinueAfterTracingContour: { contour in
-                    if contour.count <= 3 { // contour encloses no area
-                        return true
-                    }
+                shouldContinueAfterTracing: { trace in
+                    let (_, (x, y), area) = trace
 
-                    // calculate the enclosed area
-                    var doubleArea = (contour.last!.x * contour.first!.y) - (contour.last!.y * contour.first!.x);
-                    for i in 0..<(contour.count - 1) {
-                        doubleArea += (contour[i].x * contour[i + 1].y) - (contour[i].y * contour[i + 1].x)
-                    }
-
-                    if doubleArea == 0 { // contour encloses no area
-                        return true
-                    }
-
-                    let area = Double(abs(doubleArea)) / 2
+                    if area == 0 { return true }
 
                     // calculate the wand radius
                     let radius = sqrt(area / .pi)
-
-                    // calculate the wand center
-                    let (sumX, sumY) = contour.reduce((0, 0), { ($0.0 + $1.x, $0.1 + $1.y) })
-                    let x = Double(sumX) / Double(contour.count), y = Double(sumY) / Double(contour.count)
 
                     // make rectangle from wand
                     let diameter = radius * 2
@@ -435,7 +419,7 @@ public struct WandDetector {
                     let untransformedWandRectangle = wandRectangle.applying(self.transform.inverted())
                     let untransformedWand: Wand = (center: (x: Double(untransformedWandRectangle.midX), y: Double(untransformedWandRectangle.midY)), radius: Double(untransformedWandRectangle.width / 2))
 
-                    return shouldContinueAfterDetectingWand(untransformedWand)
+                    return shouldContinueAfterDetecting(untransformedWand)
             })
 
         }, getting: UInt8.self)
