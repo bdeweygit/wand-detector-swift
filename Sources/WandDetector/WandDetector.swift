@@ -317,7 +317,7 @@ public struct WandDetector {
             kCVPixelBufferWidthKey: outputImageWidth,
             kCVPixelBufferHeightKey: outputImageHeight,
             kCVPixelBufferIOSurfacePropertiesKey: [:],
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_OneComponent8
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_OneComponent8 // grayscale pixels
         ]
 
         var poolOut: CVPixelBufferPool?
@@ -449,7 +449,7 @@ public struct WandDetector {
                 shouldContinueAfterTracing: { trace in
                     let (_, (x, y), area) = trace
 
-                    if area == 0 { return true }
+                    guard area > 0 else { return true }
 
                     // calculate the wand radius
                     var radius = sqrt(area / .pi)
@@ -503,8 +503,8 @@ extension CVImageBuffer {
 
         // call body with a pixel getter function
         return body({ (x, y) in
-            let inImage = widthRange.contains(x) && heightRange.contains(y)
-            return inImage ? pixels[x + (y * rowLength)] : nil
+            guard widthRange.contains(x) && heightRange.contains(y) else { return nil }
+            return pixels[x + (y * rowLength)]
         })
     }
 }
