@@ -39,8 +39,8 @@ public struct WandDetector {
     private let transform: CGAffineTransform
     private let thresholdFilter: CIColorCube
     private let binarizationFilter: CIColorPosterize
-    private var widthErosionFilter: CIMorphologyRectangleMinimum
-    private var heightErosionFilter: CIMorphologyRectangleMinimum
+    private let widthErosionFilter: CIMorphologyRectangleMinimum
+    private let heightErosionFilter: CIMorphologyRectangleMinimum
     private let squareErosionFilter: CIMorphologyRectangleMinimum
     private let squareDilationFilter: CIMorphologyRectangleMaximum
 
