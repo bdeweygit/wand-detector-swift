@@ -4,14 +4,15 @@ import CoreImage.CIFilterBuiltins
 
 #if os(iOS) || os(tvOS)
 import UIKit.UIColor
-typealias Color = UIColor
+fileprivate typealias Color = UIColor
 #elseif os(macOS)
 import AppKit.NSColor
-typealias Color = NSColor
+fileprivate typealias Color = NSColor
 #endif
 
+fileprivate typealias PixelPoint = (x: Int, y: Int)
 public typealias Wand = (center: (x: Double, y: Double), radius: Double)
-public typealias ImageRegion = (origin: (x: Int, y: Int), size: ContourTracer.ImageSize)
+public typealias ImageRegion = (origin: (x: Int, y: Int), size: (width: Int, height: Int))
 
 public enum WandDetectorError: Error {
     case invalidImage
@@ -118,7 +119,7 @@ public struct WandDetector {
 
         // transform min wand to get the row stride
         let transformedMinWandRectangle = minWandRectangle.applying(transform)
-        let rowStride = Int(transformedMinWandRectangle.width.rounded(.down)).clampedTo(1...Int.max)
+        let rowStride = Int(transformedMinWandRectangle.width.rounded(.down)).clamped(to: 1...Int.max)
 
         // crop image to region of interest and transform
         let transformedImage = CIImage(cvImageBuffer: image).cropped(to: ROIRectangle).transformed(by: transform)
@@ -150,27 +151,27 @@ public struct WandDetector {
             for row in 0..<height {
                 for col in 0..<width {
                     let point: PixelPoint = (x: col, y: row)
-                    if let pixel = getPixelAt(point) {
-                        // create an rgba color from the pixel bits
-                        let blue = CGFloat((pixel << 24) >> 24) / 255
-                        let green = CGFloat((pixel << 16) >> 24) / 255
-                        let red = CGFloat((pixel << 8) >> 24) / 255
+                    guard let pixel = getPixelAt(point) else { continue }
 
-                        let rgba = Color(red: red, green: green, blue: blue, alpha: 1)
+                    // create an rgba color from the UInt32 pixel bits
+                    let blue = CGFloat((pixel << 24) >> 24) / 255
+                    let green = CGFloat((pixel << 16) >> 24) / 255
+                    let red = CGFloat((pixel << 8) >> 24) / 255
 
-                        // get the HSB values
-                        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
-                        rgba.getHue(&h, saturation: &s, brightness: &b, alpha: nil)
+                    let rgba = Color(red: red, green: green, blue: blue, alpha: 1)
 
-                        // determine if wand pixel
-                        let distanceFromWandCenter = sqrt(pow(Double(point.x) - transformedWand.center.x, 2) + pow(Double(point.y) - transformedWand.center.y, 2))
-                        let isWand = distanceFromWandCenter <= transformedWand.radius
+                    // get the HSB values
+                    var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
+                    rgba.getHue(&h, saturation: &s, brightness: &b, alpha: nil)
 
-                        // ignore background pixels in the deadzone
-                        if !isWand && distanceFromWandCenter <= deadzoneRadius { continue }
+                    // determine if wand pixel
+                    let distanceFromWandCenter = sqrt(pow(Double(point.x) - transformedWand.center.x, 2) + pow(Double(point.y) - transformedWand.center.y, 2))
+                    let isWand = distanceFromWandCenter <= transformedWand.radius
 
-                        pixels.append((h, s, b, isWand))
-                    }
+                    // verify pixel is not in the deadzone
+                    guard isWand || distanceFromWandCenter > deadzoneRadius else { continue }
+
+                    pixels.append((h, s, b, isWand))
                 }
             }
         }, getting: UInt32.self)
@@ -190,17 +191,15 @@ public struct WandDetector {
         for arc in 0..<arcs {
             let hueRotation = CGFloat(arc) * unitRotation // will rotate hue circle so degree 180 bisects the arc
 
-            let pixelsInArc = wandPixels.filter({ arcRange.contains($0.h.rotatedBy(hueRotation)) }).count
-
-            if pixelsInArc > greatestPixelsInAnArc {
-                greatestPixelsInAnArc = pixelsInArc
-                wandfullArc = arc
-            }
+            let pixelsInArc = wandPixels.filter({ arcRange.contains($0.h.rotated(by: hueRotation)) }).count
+            guard pixelsInArc > greatestPixelsInAnArc else { continue }
+            greatestPixelsInAnArc = pixelsInArc
+            wandfullArc = arc
         }
 
         // rotate the hue values and filter for pixels that are in wandfullArc
         let hueRotation = CGFloat(wandfullArc) * unitRotation
-        pixels = pixels.map({ ($0.h.rotatedBy(hueRotation), $0.s, $0.b, $0.isWand) }).filter({ arcRange.contains($0.h) })
+        pixels = pixels.map({ ($0.h.rotated(by: hueRotation), $0.s, $0.b, $0.isWand) }).filter({ arcRange.contains($0.h) })
 
         assert(pixels.count > 0)
 
@@ -219,7 +218,7 @@ public struct WandDetector {
         assert(pixels.count > 0)
 
         // get min wand activation pixel count
-        let clampedMinWA = minWA.clampedTo(0.nextUp...1)
+        let clampedMinWA = minWA.clamped(to: 0.nextUp...1)
         let minWAC = Int((Double(wandPixels.count) * clampedMinWA).rounded(.up))
 
         // create HSB range combinations where only one range is optimized
@@ -239,10 +238,8 @@ public struct WandDetector {
             for i in 0..<pixels.count { // find the best upper bound
                 if pixels[i].isWand {
                     score += 1; WAC += 1;
-                    if WAC >= minWAC && score >= bestScore {
-                        bestScore = score
-                        upper = i
-                    }
+                    guard WAC >= minWAC && score >= bestScore else { continue }
+                    bestScore = score; upper = i
                 } else { score -= 1 }
             }
 
@@ -251,11 +248,8 @@ public struct WandDetector {
             for i in (0...upper).reversed() { // find the best lower bound
                 if pixels[i].isWand {
                     score += 1; WAC += 1;
-                    if WAC >= minWAC && score >= bestScore {
-                        bestScore = score
-                        bestWAC = WAC
-                        lower = i
-                    }
+                    guard WAC >= minWAC && score >= bestScore else { continue }
+                    bestScore = score; bestWAC = WAC; lower = i
                 } else { score -= 1 }
             }
 
@@ -293,7 +287,7 @@ public struct WandDetector {
                     // get the HSB values
                     var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
                     rgba.getHue(&h, saturation: &s, brightness: &b, alpha: nil)
-                    h = h.rotatedBy(hueRotation)
+                    h = h.rotated(by: hueRotation)
 
                     // white if all HSB values are in range, black otherwise
                     let color: Float =
@@ -380,7 +374,7 @@ public struct WandDetector {
 
     // MARK: Detection
 
-    public func detectIn(_ image: CVImageBuffer, shouldContinueAfterDetecting: (Wand) -> Bool) throws -> CVImageBuffer {
+    public func detect(in image: CVImageBuffer, shouldContinueAfterDetecting: (Wand) -> Bool) throws -> CVImageBuffer {
         // verify image size is correct
         guard CVImageBufferGetEncodedSize(image).equalTo(self.imageSize) else {
             throw WandDetectorError.invalidImage
@@ -439,15 +433,15 @@ public struct WandDetector {
             let width = CVPixelBufferGetWidth(outputImage)
             let height = CVPixelBufferGetHeight(outputImage)
 
-            traceInImageOfSize(
-                (width, height),
-                isActiveAt: { point in
-                    guard let pixel = getPixelAt(point) else { return false }
+            ContourTracer.trace(
+                size: (width, height),
+                canTrace: {
+                    guard let pixel = getPixelAt($0) else { return false }
                     return pixel != 0
                 },
-                shouldScanRow: { $0 % self.rowStride == 0 },
-                shouldContinueAfterTracing: { trace in
-                    let (_, (x, y), area) = trace
+                shouldScan: { $0 % self.rowStride == 0 },
+                shouldContinueAfterTracing: {
+                    let (_, (x, y), area) = $0
 
                     guard area > 0 else { return true }
 
@@ -478,7 +472,7 @@ public struct WandDetector {
 
 // MARK: Extensions
 
-extension CVImageBuffer {
+fileprivate extension CVImageBuffer {
     func withPixelGetter<T, R>(_ body: ((PixelPoint) -> T?) -> R, getting type: T.Type) -> R {
         assert(CVPixelBufferGetPlaneCount(self) == 0)
 
@@ -509,14 +503,14 @@ extension CVImageBuffer {
     }
 }
 
-extension CGFloat {
-    func rotatedBy(_ rotation: CGFloat) -> CGFloat {
+fileprivate extension CGFloat {
+    func rotated(by rotation: CGFloat) -> CGFloat {
         return (self + rotation).truncatingRemainder(dividingBy: 1)
     }
 }
 
-extension Comparable {
-    func clampedTo(_ range: ClosedRange<Self>) -> Self {
+fileprivate extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
         return max(range.lowerBound, min(self, range.upperBound))
     }
 }
