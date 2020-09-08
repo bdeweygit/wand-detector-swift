@@ -498,7 +498,7 @@ fileprivate extension CVImageBuffer {
         // call body with a pixel getter function
         return body({ (x, y) in
             guard widthRange.contains(x) && heightRange.contains(y) else { return nil }
-            return pixels[x + (y * rowLength)]
+            return pixels[(y * rowLength) + x]
         })
     }
 }
