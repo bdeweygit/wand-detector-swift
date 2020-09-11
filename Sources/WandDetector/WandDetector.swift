@@ -1,4 +1,3 @@
-import CoreImage
 import ContourTracer
 import CoreImage.CIFilterBuiltins
 
@@ -11,82 +10,70 @@ fileprivate typealias Color = NSColor
 #endif
 
 fileprivate typealias PixelPoint = (x: Int, y: Int)
+public typealias ImageSize = (width: Int, height: Int)
 public typealias Wand = (center: (x: Double, y: Double), radius: Double)
-public typealias ImageRegion = (origin: (x: Int, y: Int), size: (width: Int, height: Int))
+public typealias ImageRegion = (origin: (x: Int, y: Int), size: ImageSize)
 
 public enum WandDetectorError: Error {
+    case invalidWand
     case invalidImage
     case couldNotFilterImage
     case invalidMinWandRadius
-    case invalidCalibrationWand
-    case imageDoesNotContainRegionOfInterest
+    case regionOfInterestDoesNotContainWand
     case invalidOutputImagePoolMinCardinality
+    case imageSizeDoesNotContainRegionOfInterest
     case couldNotCreateOutputImage(code: CVReturn)
     case couldNotCreateOutputImagePool(code: CVReturn)
-    case regionOfInterestDoesNotContainCalibrationWand
 }
 
 public struct WandDetector {
     // TODO: calculate maxOutputImagePixels based on some fidelity length and
     // screen projection size at some standard gameplay distance for that screen
     private let maxOutputImagePixels = 50_000 // <- why?
+    private let thresholdFilter = CIFilter.colorCube()
+    private let binarizationFilter = CIFilter.colorPosterize()
+    private let widthErosionFilter = CIFilter.morphologyRectangleMinimum()
+    private let heightErosionFilter = CIFilter.morphologyRectangleMinimum()
+    private let squareErosionFilter = CIFilter.morphologyRectangleMinimum()
+    private let squareDilationFilter = CIFilter.morphologyRectangleMaximum()
+    private let context = CIContext(options: [
+        .cacheIntermediates: false,
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.itur_709)!, // <- why?
+    ])
 
+    private let minWA: Double
     private let rowStride: Int
-    private let imageSize: CGSize
-    private let context: CIContext
     private let ROIRectangle: CGRect
+    private let imageRectangle: CGRect
     private let pool: CVPixelBufferPool
     private let transform: CGAffineTransform
-    private let thresholdFilter: CIColorCube
-    private let binarizationFilter: CIColorPosterize
-    private let widthErosionFilter: CIMorphologyRectangleMinimum
-    private let heightErosionFilter: CIMorphologyRectangleMinimum
-    private let squareErosionFilter: CIMorphologyRectangleMinimum
-    private let squareDilationFilter: CIMorphologyRectangleMaximum
 
     // MARK: Initialization
 
-    public init(calibrationImage image: CVImageBuffer, calibrationWand wand: Wand, calibrationDeadzoneScale deadzone: Double, minWandActivation minWA: Double, minWandRadius: Double = 0, regionOfInterest ROI: ImageRegion, outputImagePoolMinCardinality minPoolCardinality: Int = 1) throws {
+    public init(imageSize: ImageSize, regionOfInterest ROI: ImageRegion, minWandActivation minWA: Double, minWandRadius: Double = 0, outputImagePoolMinCardinality minPoolCardinality: Int = 1) throws {
         // verify min pool cardinality is positive
         guard minPoolCardinality > 0 else {
             throw WandDetectorError.invalidOutputImagePoolMinCardinality
         }
-
-        // make rectangle from image
-        let imageSize = CVImageBufferGetEncodedSize(image)
-        let imageRectangle = CGRect(origin: .zero, size: imageSize)
-
-        // make rectangle from region of interest
-        let ROIRectangle = CGRect(origin: CGPoint(x: ROI.origin.x, y: ROI.origin.y), size: CGSize(width: ROI.size.width, height: ROI.size.height))
-
-        // make rectangle from wand
-        let wandDiameter = wand.radius * 2
-        let wandRectangle = CGRect(origin: CGPoint(x: wand.center.x - wand.radius, y: wand.center.y - wand.radius), size: CGSize(width: wandDiameter, height: wandDiameter))
-
-        assert(wandRectangle.midX.rounded() == CGFloat(wand.center.x).rounded() && wandRectangle.midY.rounded() == CGFloat(wand.center.y).rounded(), "wandRectangle is centered incorrectly")
-
-        // make rectangle from min wand radius
-        let minWandDiameter = minWandRadius * 2
-        let minWandRectangle = CGRect(origin: wandRectangle.origin, size: CGSize(width: minWandDiameter, height: minWandDiameter))
 
         // verify min wand radius is nonnegative
         guard minWandRadius >= 0 else {
             throw WandDetectorError.invalidMinWandRadius
         }
 
-        // verify wand radius is positive and wand contains min wand
-        guard wand.radius > 0 && wandRectangle.contains(minWandRectangle) else {
-            throw WandDetectorError.invalidCalibrationWand
-        }
+        // make rectangle from min wand radius
+        let minWandDiameter = minWandRadius * 2
+        let minWandRectangle = CGRect(origin: .zero, size: CGSize(width: minWandDiameter, height: minWandDiameter))
 
-        // verify region of interest contains wand
-        guard ROIRectangle.contains(wandRectangle) else {
-            throw WandDetectorError.regionOfInterestDoesNotContainCalibrationWand
-        }
+        // make rectangle from image size
+        let imageRectangle = CGRect(origin: .zero, size: CGSize(width: imageSize.width, height: imageSize.height))
+
+        // make rectangle from region of interest
+        let ROIRectangle = CGRect(origin: CGPoint(x: ROI.origin.x, y: ROI.origin.y), size: CGSize(width: ROI.size.width, height: ROI.size.height))
 
         // verify image contains region of interest
         guard imageRectangle.contains(ROIRectangle) else {
-            throw WandDetectorError.imageDoesNotContainRegionOfInterest
+            throw WandDetectorError.imageSizeDoesNotContainRegionOfInterest
         }
 
         // create the translation transform
@@ -113,33 +100,104 @@ public struct WandDetector {
             transform = transform.concatenating(CGAffineTransform(scaleX: adjustedDownscaleX, y: adjustedDownscaleY))
         }
 
-        // transform the wand
-        let transformedWandRectangle = wandRectangle.applying(transform)
-        let transformedWand: Wand = (center: (x: Double(transformedWandRectangle.midX), y: Double(transformedWandRectangle.midY)), radius: Double(transformedWandRectangle.width / 2))
-
         // transform min wand to get the row stride
         let transformedMinWandRectangle = minWandRectangle.applying(transform)
         let rowStride = Int(transformedMinWandRectangle.width.rounded(.down)).clamped(to: 1...Int.max)
 
+        // create the output image pool
+        let poolAttributes: NSDictionary = [kCVPixelBufferPoolMinimumBufferCountKey: minPoolCardinality]
+        let pixelBufferAttributes: NSDictionary = [
+            kCVPixelBufferWidthKey: outputImageWidth,
+            kCVPixelBufferHeightKey: outputImageHeight,
+            kCVPixelBufferIOSurfacePropertiesKey: [:],
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_OneComponent8 // grayscale pixels
+        ]
+
+        var poolOut: CVPixelBufferPool?
+        var code = CVPixelBufferPoolCreate(kCFAllocatorDefault, poolAttributes, pixelBufferAttributes, &poolOut)
+        guard let pool = poolOut else {
+            throw WandDetectorError.couldNotCreateOutputImagePool(code: code)
+        }
+
+        // preallocate min pool cardinality number of output images
+        var outputImageOut: CVPixelBuffer?
+        var outputImageRetainer = [CVPixelBuffer]() // prevents pool from recycling during the below while loop
+        let auxAttributes: NSDictionary = [kCVPixelBufferPoolAllocationThresholdKey: minPoolCardinality]
+
+        code = kCVReturnSuccess
+        while code == kCVReturnSuccess {
+            code = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, pool, auxAttributes, &outputImageOut)
+            if let outputImage = outputImageOut {
+                outputImageRetainer.append(outputImage)
+            }
+            outputImageOut = nil
+        }
+
+        assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code \(code)")
+
+        // configure the filters
+        self.binarizationFilter.levels = 2
+        self.widthErosionFilter.width = 3 // should this be proportional to maxOutputImagePixels?
+        self.widthErosionFilter.height = 1
+        self.heightErosionFilter.width = 1
+        self.heightErosionFilter.height = 3
+        self.squareErosionFilter.width = 3
+        self.squareErosionFilter.height = 3
+        self.squareDilationFilter.width = 3
+        self.squareDilationFilter.height = 3
+        self.thresholdFilter.cubeData = Data()
+        self.thresholdFilter.cubeDimension = 64 // max allowed by CIColorCube
+
+        // initialize stored properties
+        self.pool = pool
+        self.minWA = minWA
+        self.transform = transform
+        self.rowStride = rowStride
+        self.ROIRectangle = ROIRectangle
+        self.imageRectangle = imageRectangle
+    }
+
+    // MARK: Calibration
+
+    public func calibrate(using image: CVImageBuffer, _ wand: Wand, deadzoneScale deadzone: Double) throws {
+        // verify image size is correct
+        guard CVImageBufferGetEncodedSize(image).equalTo(self.imageRectangle.size) else {
+            throw WandDetectorError.invalidImage
+        }
+
+        // verify wand radius is positive
+        guard wand.radius > 0 else {
+            throw WandDetectorError.invalidWand
+        }
+
+        // make rectangle from wand
+        let wandDiameter = wand.radius * 2
+        let wandRectangle = CGRect(origin: CGPoint(x: wand.center.x - wand.radius, y: wand.center.y - wand.radius), size: CGSize(width: wandDiameter, height: wandDiameter))
+
+        assert(wandRectangle.midX.rounded() == CGFloat(wand.center.x).rounded() && wandRectangle.midY.rounded() == CGFloat(wand.center.y).rounded(), "wandRectangle is centered incorrectly")
+
+        // verify region of interest contains wand
+        guard self.ROIRectangle.contains(wandRectangle) else {
+            throw WandDetectorError.regionOfInterestDoesNotContainWand
+        }
+
+        // transform the wand
+        let transformedWandRectangle = wandRectangle.applying(self.transform)
+        let transformedWand: Wand = (center: (x: Double(transformedWandRectangle.midX), y: Double(transformedWandRectangle.midY)), radius: Double(transformedWandRectangle.width / 2))
+
         // crop image to region of interest and transform
-        let transformedImage = CIImage(cvImageBuffer: image).cropped(to: ROIRectangle).transformed(by: transform)
+        let transformedImage = CIImage(cvImageBuffer: image).cropped(to: self.ROIRectangle).transformed(by: self.transform)
 
         // create the output image to render into
         var outputImageOut: CVPixelBuffer?
-        var code = CVPixelBufferCreate(kCFAllocatorDefault, outputImageWidth, outputImageHeight, kCVPixelFormatType_32BGRA, nil, &outputImageOut)
+        let code = CVPixelBufferCreate(kCFAllocatorDefault, Int(transformedImage.extent.width), Int(transformedImage.extent.height), kCVPixelFormatType_32BGRA, nil, &outputImageOut)
         guard let outputImage = outputImageOut else {
             throw WandDetectorError.couldNotCreateOutputImage(code: code)
         }
 
-        // create the context
-        let context = CIContext(options: [
-            .cacheIntermediates: false,
-            .workingColorSpace: CGColorSpace(name: CGColorSpace.itur_709)!, // <- why?
-        ])
-
         // render to the output image using the working color space as the output color space
         let bounds = CGRect(origin: .zero, size: CVImageBufferGetEncodedSize(outputImage))
-        context.render(transformedImage, to: outputImage, bounds: bounds, colorSpace: context.workingColorSpace!)
+        self.context.render(transformedImage, to: outputImage, bounds: bounds, colorSpace: self.context.workingColorSpace!)
 
         // get output image pixels in HSB format
         var pixels = [(h: CGFloat, s: CGFloat, b: CGFloat, isWand: Bool)]()
@@ -218,7 +276,7 @@ public struct WandDetector {
         assert(pixels.count > 0)
 
         // get min wand activation pixel count
-        let clampedMinWA = minWA.clamped(to: 0.nextUp...1)
+        let clampedMinWA = self.minWA.clamped(to: 0.nextUp...1)
         let minWAC = Int((Double(wandPixels.count) * clampedMinWA).rounded(.up))
 
         // create HSB range combinations where only one range is optimized
@@ -272,14 +330,17 @@ public struct WandDetector {
 
         // create color cube data
         var colorCube = [Float]()
-        let cubeDimension: Float = 64 // max allowed by CIColorCube
-        let gamut = Int(cubeDimension - 1)
+        let oldColorCube = self.thresholdFilter.cubeData.count > 0 ? self.thresholdFilter.cubeData.withUnsafeBytes({ unsafeBitCast($0, to: UnsafeBufferPointer<Float>.self) }) : nil
+        let gamut = Int(self.thresholdFilter.cubeDimension - 1)
         for b in 0...gamut {
             let blue = CGFloat(b) / CGFloat(gamut)
             for g in 0...gamut {
                 let green = CGFloat(g) / CGFloat(gamut)
                 for r in 0...gamut {
                     let red = CGFloat(r) / CGFloat(gamut)
+
+                    // get old color
+                    let oldColor = oldColorCube?[(b * (gamut + 1) * (gamut + 1) * 4) + (g * (gamut + 1) * 4) + (r * 4)]
 
                     // create an rgba color
                     let rgba = Color(red: red, green: green, blue: blue, alpha: 1)
@@ -291,9 +352,10 @@ public struct WandDetector {
 
                     // white if all HSB values are in range, black otherwise
                     let color: Float =
-                        hueRange.contains(h) &&
+                        oldColor == 1 ||
+                        (hueRange.contains(h) &&
                         saturationRange.contains(s) &&
-                        brightnessRange.contains(b) ? 1 : 0
+                        brightnessRange.contains(b)) ? 1 : 0
 
                     colorCube.append(color) // red
                     colorCube.append(color) // green
@@ -303,80 +365,17 @@ public struct WandDetector {
             }
         }
 
-        let cubeData = colorCube.withUnsafeBufferPointer({ buffer in Data(buffer: buffer) })
+        let cubeData = colorCube.withUnsafeBufferPointer({ Data(buffer: $0) })
 
-        // create the output image pool
-        let poolAttributes: NSDictionary = [kCVPixelBufferPoolMinimumBufferCountKey: minPoolCardinality]
-        let pixelBufferAttributes: NSDictionary = [
-            kCVPixelBufferWidthKey: outputImageWidth,
-            kCVPixelBufferHeightKey: outputImageHeight,
-            kCVPixelBufferIOSurfacePropertiesKey: [:],
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_OneComponent8 // grayscale pixels
-        ]
-
-        var poolOut: CVPixelBufferPool?
-        code = CVPixelBufferPoolCreate(kCFAllocatorDefault, poolAttributes, pixelBufferAttributes, &poolOut)
-        guard let pool = poolOut else {
-            throw WandDetectorError.couldNotCreateOutputImagePool(code: code)
-        }
-
-        // preallocate min pool cardinality number of output images
-        outputImageOut = nil
-        var outputImageRetainer = [CVPixelBuffer]() // prevents pool from recycling during the below while loop
-        let auxAttributes: NSDictionary = [kCVPixelBufferPoolAllocationThresholdKey: minPoolCardinality]
-
-        code = kCVReturnSuccess
-        while code == kCVReturnSuccess {
-            code = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, pool, auxAttributes, &outputImageOut)
-            if let outputImage = outputImageOut {
-                outputImageRetainer.append(outputImage)
-            }
-            outputImageOut = nil
-        }
-
-        assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code \(code)")
-
-        // create the filters
-        let thresholdFilter = CIFilter.colorCube()
-        let binarizationFilter = CIFilter.colorPosterize()
-        let widthErosionFilter = CIFilter.morphologyRectangleMinimum()
-        let heightErosionFilter = CIFilter.morphologyRectangleMinimum()
-        let squareErosionFilter = CIFilter.morphologyRectangleMinimum()
-        let squareDilationFilter = CIFilter.morphologyRectangleMaximum()
-
-        // configure the filters
-        binarizationFilter.levels = 2
-        widthErosionFilter.width = 3 // should this be proportional to maxOutputImagePixels?
-        widthErosionFilter.height = 1
-        heightErosionFilter.width = 1
-        heightErosionFilter.height = 3
-        squareErosionFilter.width = 3
-        squareErosionFilter.height = 3
-        squareDilationFilter.width = 3
-        squareDilationFilter.height = 3
-        thresholdFilter.cubeData = cubeData
-        thresholdFilter.cubeDimension = cubeDimension
-
-        // initialize stored properties
-        self.pool = pool
-        self.context = context
-        self.transform = transform
-        self.rowStride = rowStride
-        self.imageSize = imageSize
-        self.ROIRectangle = ROIRectangle
-        self.thresholdFilter = thresholdFilter
-        self.binarizationFilter = binarizationFilter
-        self.widthErosionFilter = widthErosionFilter
-        self.heightErosionFilter = heightErosionFilter
-        self.squareErosionFilter = squareErosionFilter
-        self.squareDilationFilter = squareDilationFilter
+        // configure the threshold filter
+        self.thresholdFilter.cubeData = cubeData
     }
 
     // MARK: Detection
 
     public func detect(in image: CVImageBuffer, shouldContinueAfterDetecting: (Wand) -> Bool) throws -> CVImageBuffer {
         // verify image size is correct
-        guard CVImageBufferGetEncodedSize(image).equalTo(self.imageSize) else {
+        guard CVImageBufferGetEncodedSize(image).equalTo(self.imageRectangle.size) else {
             throw WandDetectorError.invalidImage
         }
 
@@ -484,8 +483,8 @@ fileprivate extension CVImageBuffer {
 
         // calculate row length
         let rowBytes = CVPixelBufferGetBytesPerRow(self)
-        let pixelSize = MemoryLayout<T>.size
-        let rowLength = rowBytes / pixelSize
+        let pixelStride = MemoryLayout<T>.stride
+        let rowLength = rowBytes / pixelStride
 
         // lock and later unlock
         CVPixelBufferLockBaseAddress(self, .readOnly)
