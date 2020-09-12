@@ -159,9 +159,9 @@ public struct WandDetector {
 
     // MARK: Calibration
 
-    public func calibrate(using image: CVImageBuffer, _ wand: Wand, deadzoneScale deadzone: Double) throws {
-        // verify image size is correct
-        guard CVImageBufferGetEncodedSize(image).equalTo(self.imageRectangle.size) else {
+    public func calibrate(using image: CIImage, _ wand: Wand, deadzoneScale deadzone: Double) throws {
+        // verify image extent is correct
+        guard image.extent.equalTo(self.imageRectangle) else {
             throw WandDetectorError.invalidImage
         }
 
@@ -186,7 +186,7 @@ public struct WandDetector {
         let transformedWand: Wand = (center: (x: Double(transformedWandRectangle.midX), y: Double(transformedWandRectangle.midY)), radius: Double(transformedWandRectangle.width / 2))
 
         // crop image to region of interest and transform
-        let transformedImage = CIImage(cvImageBuffer: image).cropped(to: self.ROIRectangle).transformed(by: self.transform)
+        let transformedImage = image.cropped(to: self.ROIRectangle).transformed(by: self.transform)
 
         // create the output image to render into
         var outputImageOut: CVPixelBuffer?
@@ -211,23 +211,22 @@ public struct WandDetector {
                     let point: PixelPoint = (x: col, y: row)
                     guard let pixel = getPixelAt(point) else { continue }
 
-                    // create an rgba color from the UInt32 pixel bits
-                    let blue = CGFloat((pixel << 24) >> 24) / 255
-                    let green = CGFloat((pixel << 16) >> 24) / 255
-                    let red = CGFloat((pixel << 8) >> 24) / 255
-
-                    let rgba = Color(red: red, green: green, blue: blue, alpha: 1)
-
-                    // get the HSB values
-                    var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
-                    rgba.getHue(&h, saturation: &s, brightness: &b, alpha: nil)
-
                     // determine if wand pixel
                     let distanceFromWandCenter = sqrt(pow(Double(point.x) - transformedWand.center.x, 2) + pow(Double(point.y) - transformedWand.center.y, 2))
                     let isWand = distanceFromWandCenter <= transformedWand.radius
 
                     // verify pixel is not in the deadzone
                     guard isWand || distanceFromWandCenter > deadzoneRadius else { continue }
+
+                    // create an rgba color from the UInt32 pixel bits
+                    let blue = CGFloat((pixel << 24) >> 24) / 255
+                    let green = CGFloat((pixel << 16) >> 24) / 255
+                    let red = CGFloat((pixel << 8) >> 24) / 255
+                    let rgba = Color(red: red, green: green, blue: blue, alpha: 1)
+
+                    // get the HSB values
+                    var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
+                    rgba.getHue(&h, saturation: &s, brightness: &b, alpha: nil)
 
                     pixels.append((h, s, b, isWand))
                 }
@@ -373,14 +372,14 @@ public struct WandDetector {
 
     // MARK: Detection
 
-    public func detect(in image: CVImageBuffer, shouldContinueAfterDetecting: (Wand) -> Bool) throws -> CVImageBuffer {
-        // verify image size is correct
-        guard CVImageBufferGetEncodedSize(image).equalTo(self.imageRectangle.size) else {
+    public func detect(in image: CIImage, shouldContinueAfterDetecting: (Wand) -> Bool) throws -> CVImageBuffer {
+        // verify image extent is correct
+        guard image.extent.equalTo(self.imageRectangle) else {
             throw WandDetectorError.invalidImage
         }
 
         // crop
-        let cropped = CIImage(cvImageBuffer: image).cropped(to: self.ROIRectangle)
+        let cropped = image.cropped(to: self.ROIRectangle)
 
         // transform
         let transformed = cropped.transformed(by: self.transform)
