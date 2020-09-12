@@ -329,7 +329,8 @@ public struct WandDetector {
         // create color cube data
         var colorCube = [Float]()
         let oldColorCube = self.thresholdFilter.cubeData.count > 0 ? self.thresholdFilter.cubeData.withUnsafeBytes({ unsafeBitCast($0, to: UnsafeBufferPointer<Float>.self) }) : nil
-        let gamut = Int(self.thresholdFilter.cubeDimension - 1)
+        let cubeDimension = Int(self.thresholdFilter.cubeDimension)
+        let gamut = cubeDimension - 1
         for b in 0...gamut {
             let blue = CGFloat(b) / CGFloat(gamut)
             for g in 0...gamut {
@@ -337,8 +338,12 @@ public struct WandDetector {
                 for r in 0...gamut {
                     let red = CGFloat(r) / CGFloat(gamut)
 
-                    // get old color
-                    let oldColor = oldColorCube?[(b * (gamut + 1) * (gamut + 1) * 4) + (g * (gamut + 1) * 4) + (r * 4)]
+                    // get the old texel
+                    let rOffset = r * 4
+                    let gOffset = cubeDimension * g * 4
+                    let bOffset = cubeDimension * cubeDimension * b * 4
+                    let index = rOffset + gOffset + bOffset
+                    let oldTexel = oldColorCube?[index]
 
                     // create an rgba color
                     let rgba = Color(red: red, green: green, blue: blue, alpha: 1)
@@ -348,16 +353,16 @@ public struct WandDetector {
                     rgba.getHue(&h, saturation: &s, brightness: &b, alpha: nil)
                     h = h.rotated(by: hueRotation)
 
-                    // white if all HSB values are in range, black otherwise
-                    let color: Float =
-                        oldColor == 1 ||
+                    // get the texel
+                    let texel: Float =
+                        oldTexel == 1 ||
                         (hueRange.contains(h) &&
                         saturationRange.contains(s) &&
                         brightnessRange.contains(b)) ? 1 : 0
 
-                    colorCube.append(color) // red
-                    colorCube.append(color) // green
-                    colorCube.append(color) // blue
+                    colorCube.append(texel) // red
+                    colorCube.append(texel) // green
+                    colorCube.append(texel) // blue
                     colorCube.append(1)     // alpha
                 }
             }
