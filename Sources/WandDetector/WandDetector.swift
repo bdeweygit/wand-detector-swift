@@ -321,8 +321,7 @@ public struct WandDetector {
         }
 
         // get HSB ranges from the highest scoring range combo using WAC as a tie breaker
-        var bestRangeCombo = rangeCombos.max(by: { $0.score < $1.score })!
-        bestRangeCombo = rangeCombos.first(where: { $0.score == bestRangeCombo.score && $0.WAC > bestRangeCombo.WAC }) ?? bestRangeCombo
+        let bestRangeCombo = rangeCombos.max(by: { $0.score == $1.score ? $0.WAC < $1.WAC : $0.score < $1.score })!
         let hueRange = bestRangeCombo.hueRange
         let saturationRange = bestRangeCombo.saturationRange
         let brightnessRange = bestRangeCombo.brightnessRange
