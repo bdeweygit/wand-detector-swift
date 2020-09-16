@@ -10,6 +10,7 @@ fileprivate typealias Color = NSColor
 #endif
 
 fileprivate typealias PixelPoint = (x: Int, y: Int)
+public typealias UseLastCalibration = () -> Void
 public typealias ImageSize = (width: Int, height: Int)
 public typealias Wand = (center: (x: Double, y: Double), radius: Double)
 public typealias ImageRegion = (origin: (x: Int, y: Int), size: ImageSize)
@@ -159,7 +160,7 @@ public struct WandDetector {
 
     // MARK: Calibration
 
-    public func calibrate(using image: CIImage, _ wand: Wand, deadzoneScale deadzone: Double) throws {
+    public func calibrate(using image: CIImage, _ wand: Wand, deadzoneScale deadzone: Double) throws -> UseLastCalibration {
         // verify image extent is correct
         guard image.extent.equalTo(self.imageRectangle) else {
             throw WandDetectorError.invalidImage
@@ -249,9 +250,10 @@ public struct WandDetector {
             let hueRotation = CGFloat(arc) * unitRotation // will rotate hue circle so degree 180 bisects the arc
 
             let pixelsInArc = wandPixels.filter({ arcRange.contains($0.h.rotated(by: hueRotation)) }).count
-            guard pixelsInArc > greatestPixelsInAnArc else { continue }
-            greatestPixelsInAnArc = pixelsInArc
-            wandfullArc = arc
+            if pixelsInArc > greatestPixelsInAnArc {
+                greatestPixelsInAnArc = pixelsInArc
+                wandfullArc = arc
+            }
         }
 
         // rotate the hue values and filter for pixels that are in wandfullArc
@@ -295,8 +297,9 @@ public struct WandDetector {
             for i in 0..<pixels.count { // find the best upper bound
                 if pixels[i].isWand {
                     score += 1; WAC += 1;
-                    guard WAC >= minWAC && score >= bestScore else { continue }
-                    bestScore = score; upper = i
+                    if  WAC >= minWAC && score >= bestScore {
+                        bestScore = score; upper = i
+                    }
                 } else { score -= 1 }
             }
 
@@ -305,8 +308,9 @@ public struct WandDetector {
             for i in (0...upper).reversed() { // find the best lower bound
                 if pixels[i].isWand {
                     score += 1; WAC += 1;
-                    guard WAC >= minWAC && score >= bestScore else { continue }
-                    bestScore = score; bestWAC = WAC; lower = i
+                    if WAC >= minWAC && score >= bestScore {
+                        bestScore = score; bestWAC = WAC; lower = i
+                    }
                 } else { score -= 1 }
             }
 
@@ -328,7 +332,8 @@ public struct WandDetector {
 
         // create color cube data
         var colorCube = [Float]()
-        let oldColorCube = self.thresholdFilter.cubeData.count > 0 ? self.thresholdFilter.cubeData.withUnsafeBytes({ unsafeBitCast($0, to: UnsafeBufferPointer<Float>.self) }) : nil
+        let oldCubeData = self.thresholdFilter.cubeData
+        let oldColorCube = oldCubeData.count > 0 ? oldCubeData.withUnsafeBytes({ unsafeBitCast($0, to: UnsafeBufferPointer<Float>.self) }) : nil
         let cubeDimension = Int(self.thresholdFilter.cubeDimension)
         let gamut = cubeDimension - 1
         for b in 0...gamut {
@@ -372,6 +377,10 @@ public struct WandDetector {
 
         // configure the threshold filter
         self.thresholdFilter.cubeData = cubeData
+
+        return { // a closure that sets the threshold filter to its prior state
+            self.thresholdFilter.cubeData = oldCubeData
+        }
     }
 
     // MARK: Detection
@@ -445,6 +454,7 @@ public struct WandDetector {
                 shouldContinueAfterTracing: {
                     let (_, (x, y), area) = $0
 
+                    // ignore zero area contours
                     guard area > 0 else { return true }
 
                     // calculate the wand radius
