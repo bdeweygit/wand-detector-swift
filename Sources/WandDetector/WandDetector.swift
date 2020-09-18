@@ -31,8 +31,7 @@ public struct WandDetector {
     // TODO: calculate maxOutputImagePixels based on some fidelity length and
     // screen projection size at some standard gameplay distance for that screen
     private let maxOutputImagePixels = 50_000 // <- why?
-    private let thresholdFilter = CIFilter.colorCube()
-    private let binarizationFilter = CIFilter.colorPosterize()
+    private let rangeFilter = CIFilter.colorCube()
     private let widthErosionFilter = CIFilter.morphologyRectangleMinimum()
     private let heightErosionFilter = CIFilter.morphologyRectangleMinimum()
     private let squareErosionFilter = CIFilter.morphologyRectangleMinimum()
@@ -137,7 +136,8 @@ public struct WandDetector {
         assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code \(code)")
 
         // configure the filters
-        self.binarizationFilter.levels = 2
+        self.rangeFilter.cubeData = Data()
+        self.rangeFilter.cubeDimension = 64 // max allowed by CIColorCube
         self.widthErosionFilter.width = 3 // should this be proportional to maxOutputImagePixels?
         self.widthErosionFilter.height = 1
         self.heightErosionFilter.width = 1
@@ -146,8 +146,6 @@ public struct WandDetector {
         self.squareErosionFilter.height = 3
         self.squareDilationFilter.width = 3
         self.squareDilationFilter.height = 3
-        self.thresholdFilter.cubeData = Data()
-        self.thresholdFilter.cubeDimension = 64 // max allowed by CIColorCube
 
         // initialize stored properties
         self.pool = pool
@@ -332,9 +330,9 @@ public struct WandDetector {
 
         // create color cube data
         var colorCube = [Float]()
-        let oldCubeData = self.thresholdFilter.cubeData
+        let oldCubeData = self.rangeFilter.cubeData
         let oldColorCube = oldCubeData.count > 0 ? oldCubeData.withUnsafeBytes({ unsafeBitCast($0, to: UnsafeBufferPointer<Float>.self) }) : nil
-        let cubeDimension = Int(self.thresholdFilter.cubeDimension)
+        let cubeDimension = Int(self.rangeFilter.cubeDimension)
         let gamut = cubeDimension - 1
         for b in 0...gamut {
             let blue = CGFloat(b) / CGFloat(gamut)
@@ -375,11 +373,11 @@ public struct WandDetector {
 
         let cubeData = colorCube.withUnsafeBufferPointer({ Data(buffer: $0) })
 
-        // configure the threshold filter
-        self.thresholdFilter.cubeData = cubeData
+        // configure the range filter
+        self.rangeFilter.cubeData = cubeData
 
-        return { // a closure that sets the threshold filter to its prior state
-            self.thresholdFilter.cubeData = oldCubeData
+        return { // a closure that sets the range filter to its prior state
+            self.rangeFilter.cubeData = oldCubeData
         }
     }
 
@@ -397,16 +395,12 @@ public struct WandDetector {
         // transform
         let transformed = cropped.transformed(by: self.transform)
 
-        // threshold
-        self.thresholdFilter.inputImage = transformed
-        let thresholded = self.thresholdFilter.outputImage
-
-        // binarize
-        self.binarizationFilter.inputImage = thresholded
-        let binarized = self.binarizationFilter.outputImage
+        // range
+        self.rangeFilter.inputImage = transformed
+        let ranged = self.rangeFilter.outputImage
 
         // clamp
-        let clamped = binarized?.clampedToExtent()
+        let clamped = ranged?.clampedToExtent()
 
         // square dilate
         self.squareDilationFilter.inputImage = clamped
@@ -448,7 +442,7 @@ public struct WandDetector {
                 size: (width, height),
                 canTrace: {
                     guard let pixel = getPixelAt($0) else { return false }
-                    return pixel != 0
+                    return pixel >= 128 // 0.5 denormalized for UInt8
                 },
                 shouldScan: { $0 % self.rowStride == 0 },
                 shouldContinueAfterTracing: {
