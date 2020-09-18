@@ -1,15 +1,16 @@
 import ContourTracer
 import CoreImage.CIFilterBuiltins
 
-#if os(iOS) || os(tvOS)
+#if canImport(UIKit)
 import UIKit.UIColor
 fileprivate typealias Color = UIColor
-#elseif os(macOS)
+#else
 import AppKit.NSColor
 fileprivate typealias Color = NSColor
 #endif
 
 fileprivate typealias PixelPoint = (x: Int, y: Int)
+
 public typealias UseLastCalibration = () -> Void
 public typealias ImageSize = (width: Int, height: Int)
 public typealias Wand = (center: (x: Double, y: Double), radius: Double)
