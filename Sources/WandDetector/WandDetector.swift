@@ -11,27 +11,22 @@ fileprivate typealias Color = NSColor
 
 fileprivate typealias PixelPoint = (x: Int, y: Int)
 
-public typealias UseLastCalibration = () -> Void
-public typealias ImageSize = (width: Int, height: Int)
-public typealias Wand = (center: (x: Double, y: Double), radius: Double)
-public typealias ImageRegion = (origin: (x: Int, y: Int), size: ImageSize)
+public typealias ResetToLastCalibration = () -> Void
+public typealias Wand = (center: (x: CGFloat, y: CGFloat), radius: CGFloat)
 
 public enum WandDetectorError: Error {
-    case invalidWand
-    case invalidImage
-    case couldNotFilterImage
-    case invalidMinWandRadius
-    case regionOfInterestDoesNotContainWand
-    case invalidOutputImagePoolMinCardinality
-    case imageSizeDoesNotContainRegionOfInterest
-    case couldNotCreateOutputImage(code: CVReturn)
-    case couldNotCreateOutputImagePool(code: CVReturn)
+    case couldNotApplyFilters
+    case imageOriginIsNotZero
+    case imageDoesNotContainWand
+    case wandDoesNotContainPixels
+    case couldNotCreatePixelBuffer(code: CVReturn)
+    case couldNotCreatePixelBufferPool(code: CVReturn)
 }
 
 public struct WandDetector {
-    // TODO: calculate maxOutputImagePixels based on some fidelity length and
-    // screen projection size at some standard gameplay distance for that screen
-    private let maxOutputImagePixels = 50_000 // <- why?
+    private let maxDimension: Int
+    private let pool: CVPixelBufferPool
+
     private let rangeFilter = CIFilter.colorCube()
     private let widthErosionFilter = CIFilter.morphologyRectangleMinimum()
     private let heightErosionFilter = CIFilter.morphologyRectangleMinimum()
@@ -42,74 +37,20 @@ public struct WandDetector {
         .workingColorSpace: CGColorSpace(name: CGColorSpace.itur_709)!, // <- why?
     ])
 
-    private let minWA: Double
-    private let rowStride: Int
-    private let ROIRectangle: CGRect
-    private let imageRectangle: CGRect
-    private let pool: CVPixelBufferPool
-    private let transform: CGAffineTransform
-
     // MARK: Initialization
 
-    public init(imageSize: ImageSize, regionOfInterest ROI: ImageRegion, minWandActivation minWA: Double, minWandRadius: Double = 0, outputImagePoolMinCardinality minPoolCardinality: Int = 1) throws {
-        // verify min pool cardinality is positive
-        guard minPoolCardinality > 0 else {
-            throw WandDetectorError.invalidOutputImagePoolMinCardinality
-        }
+    public init(maxImageDimension: Int, maxRunningDetections: Int = 1) throws {
+        // clamp arguments
+        let maxOutputSize = self.context.outputImageMaximumSize()
+        let maxOutputDimension = Int(min(maxOutputSize.width, maxOutputSize.height))
+        let maxDimension = abs(maxImageDimension).clamped(to: 1...maxOutputDimension)
+        let maxDetections = abs(maxRunningDetections).clamped(to: 1...(.max))
 
-        // verify min wand radius is nonnegative
-        guard minWandRadius >= 0 else {
-            throw WandDetectorError.invalidMinWandRadius
-        }
-
-        // make rectangle from min wand radius
-        let minWandDiameter = minWandRadius * 2
-        let minWandRectangle = CGRect(origin: .zero, size: CGSize(width: minWandDiameter, height: minWandDiameter))
-
-        // make rectangle from image size
-        let imageRectangle = CGRect(origin: .zero, size: CGSize(width: imageSize.width, height: imageSize.height))
-
-        // make rectangle from region of interest
-        let ROIRectangle = CGRect(origin: CGPoint(x: ROI.origin.x, y: ROI.origin.y), size: CGSize(width: ROI.size.width, height: ROI.size.height))
-
-        // verify image contains region of interest
-        guard imageRectangle.contains(ROIRectangle) else {
-            throw WandDetectorError.imageSizeDoesNotContainRegionOfInterest
-        }
-
-        // create the translation transform
-        let dx = -ROIRectangle.origin.x
-        let dy = -ROIRectangle.origin.y
-        var transform = CGAffineTransform(translationX: dx, y: dy)
-
-        // width and height for the output images
-        var outputImageWidth = Int(ROIRectangle.width)
-        var outputImageHeight = Int(ROIRectangle.height)
-
-        let outputImagePixels = outputImageWidth * outputImageHeight
-        if outputImagePixels > self.maxOutputImagePixels { // create a downscale transform
-            let downscale = CGFloat(sqrt(Double(self.maxOutputImagePixels) / Double(outputImagePixels)))
-
-            // adjust the downscale so output width and height will still be integers
-            let downscaledROIRectangle = ROIRectangle.applying(CGAffineTransform(scaleX: downscale, y: downscale))
-            outputImageWidth = Int(downscaledROIRectangle.width.rounded(.down))
-            outputImageHeight = Int(downscaledROIRectangle.height.rounded(.down))
-            let adjustedDownscaleX = CGFloat(outputImageWidth) / ROIRectangle.width
-            let adjustedDownscaleY = CGFloat(outputImageHeight) / ROIRectangle.height
-
-            // concatenate with the translation transform
-            transform = transform.concatenating(CGAffineTransform(scaleX: adjustedDownscaleX, y: adjustedDownscaleY))
-        }
-
-        // transform min wand to get the row stride
-        let transformedMinWandRectangle = minWandRectangle.applying(transform)
-        let rowStride = Int(transformedMinWandRectangle.width.rounded(.down)).clamped(to: 1...Int.max)
-
-        // create the output image pool
-        let poolAttributes: NSDictionary = [kCVPixelBufferPoolMinimumBufferCountKey: minPoolCardinality]
+        // create the pixel buffer pool
+        let poolAttributes: NSDictionary = [kCVPixelBufferPoolMinimumBufferCountKey: maxDetections]
         let pixelBufferAttributes: NSDictionary = [
-            kCVPixelBufferWidthKey: outputImageWidth,
-            kCVPixelBufferHeightKey: outputImageHeight,
+            kCVPixelBufferWidthKey: maxDimension,
+            kCVPixelBufferHeightKey: maxDimension,
             kCVPixelBufferIOSurfacePropertiesKey: [:],
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_OneComponent8 // grayscale pixels
         ]
@@ -117,30 +58,30 @@ public struct WandDetector {
         var poolOut: CVPixelBufferPool?
         var code = CVPixelBufferPoolCreate(kCFAllocatorDefault, poolAttributes, pixelBufferAttributes, &poolOut)
         guard let pool = poolOut else {
-            throw WandDetectorError.couldNotCreateOutputImagePool(code: code)
+            throw WandDetectorError.couldNotCreatePixelBufferPool(code: code)
         }
 
-        // preallocate min pool cardinality number of output images
-        var outputImageOut: CVPixelBuffer?
-        var outputImageRetainer = [CVPixelBuffer]() // prevents pool from recycling during the below while loop
-        let auxAttributes: NSDictionary = [kCVPixelBufferPoolAllocationThresholdKey: minPoolCardinality]
+        // preallocate max detections number of pixel buffers
+        var pixelBufferOut: CVPixelBuffer?
+        var pixelBufferRetainer = [CVPixelBuffer]() // prevents pool from recycling during the below while loop
+        let auxAttributes: NSDictionary = [kCVPixelBufferPoolAllocationThresholdKey: maxDetections]
 
         code = kCVReturnSuccess
         while code == kCVReturnSuccess {
-            code = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, pool, auxAttributes, &outputImageOut)
-            if let outputImage = outputImageOut {
-                outputImageRetainer.append(outputImage)
+            code = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, pool, auxAttributes, &pixelBufferOut)
+            if let pixelBuffer = pixelBufferOut {
+                pixelBufferRetainer.append(pixelBuffer)
             }
-            outputImageOut = nil
+            pixelBufferOut = nil
         }
 
-        assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code \(code)")
+        assert(code == kCVReturnWouldExceedAllocationThreshold, "Unexpected CVReturn code: \(code)")
 
         // configure the filters
-        self.rangeFilter.cubeData = Data()
+        self.rangeFilter.cubeData = Data() // data is empty until calibration
         self.rangeFilter.cubeDimension = 64 // max allowed by CIColorCube
-        self.widthErosionFilter.width = 3 // should this be proportional to maxOutputImagePixels?
-        self.widthErosionFilter.height = 1
+        self.widthErosionFilter.width = 3 // should this be proportional to image size?
+        self.widthErosionFilter.height = 1 // should this be configured during detection?
         self.heightErosionFilter.width = 1
         self.heightErosionFilter.height = 3
         self.squareErosionFilter.width = 3
@@ -150,70 +91,68 @@ public struct WandDetector {
 
         // initialize stored properties
         self.pool = pool
-        self.minWA = minWA
-        self.transform = transform
-        self.rowStride = rowStride
-        self.ROIRectangle = ROIRectangle
-        self.imageRectangle = imageRectangle
+        self.maxDimension = maxDimension
     }
 
     // MARK: Calibration
 
-    public func calibrate(using image: CIImage, _ wand: Wand, deadzoneScale deadzone: Double) throws -> UseLastCalibration {
-        // verify image extent is correct
-        guard image.extent.equalTo(self.imageRectangle) else {
-            throw WandDetectorError.invalidImage
+    public func calibrate(using image: CIImage, _ wand: Wand, deadzoneScale: CGFloat = 1, minWandActivation: CGFloat = 1) throws -> ResetToLastCalibration {
+        // verify image origin is zero
+        let extent = image.extent
+        guard extent.origin == .zero else {
+            throw WandDetectorError.imageOriginIsNotZero
         }
 
-        // verify wand radius is positive
-        guard wand.radius > 0 else {
-            throw WandDetectorError.invalidWand
-        }
-
-        // make rectangle from wand
+        // verify image contains the wand
         let wandDiameter = wand.radius * 2
-        let wandRectangle = CGRect(origin: CGPoint(x: wand.center.x - wand.radius, y: wand.center.y - wand.radius), size: CGSize(width: wandDiameter, height: wandDiameter))
-
-        assert(wandRectangle.midX.rounded() == CGFloat(wand.center.x).rounded() && wandRectangle.midY.rounded() == CGFloat(wand.center.y).rounded(), "wandRectangle is centered incorrectly")
-
-        // verify region of interest contains wand
-        guard self.ROIRectangle.contains(wandRectangle) else {
-            throw WandDetectorError.regionOfInterestDoesNotContainWand
+        let wandRectangle = CGRect(x: wand.center.x - wand.radius, y: wand.center.y - wand.radius, width: wandDiameter, height: wandDiameter)
+        guard extent.contains(wandRectangle) else {
+            throw WandDetectorError.imageDoesNotContainWand
         }
 
-        // transform the wand
-        let transformedWandRectangle = wandRectangle.applying(self.transform)
-        let transformedWand: Wand = (center: (x: Double(transformedWandRectangle.midX), y: Double(transformedWandRectangle.midY)), radius: Double(transformedWandRectangle.width / 2))
+        // clamp arguments
+        let minWA = abs(minWandActivation).clamped(to: .leastNonzeroMagnitude...1)
+        let deadzone = abs(deadzoneScale).clamped(to: 1...(.greatestFiniteMagnitude))
 
-        // crop image to region of interest and transform
-        let transformedImage = image.cropped(to: self.ROIRectangle).transformed(by: self.transform)
-
-        // create the output image to render into
-        var outputImageOut: CVPixelBuffer?
-        let code = CVPixelBufferCreate(kCFAllocatorDefault, Int(transformedImage.extent.width), Int(transformedImage.extent.height), kCVPixelFormatType_32BGRA, nil, &outputImageOut)
-        guard let outputImage = outputImageOut else {
-            throw WandDetectorError.couldNotCreateOutputImage(code: code)
+        // create the downscale transform
+        var transform = CGAffineTransform.identity
+        let greatestDimension = max(extent.width, extent.height)
+        if greatestDimension > CGFloat(self.maxDimension) {
+            let downscale = CGFloat(self.maxDimension) / greatestDimension
+            transform = CGAffineTransform(scaleX: downscale, y: downscale)
         }
 
-        // render to the output image using the working color space as the output color space
-        let bounds = CGRect(origin: .zero, size: CVImageBufferGetEncodedSize(outputImage))
-        self.context.render(transformedImage, to: outputImage, bounds: bounds, colorSpace: self.context.workingColorSpace!)
+        // downscale
+        let downscaledImage = image.transformed(by: transform)
+        let downscaledWandRectangle = wandRectangle.applying(transform)
+        let downscaledWand: Wand = (center: (x: downscaledWandRectangle.midX, y: downscaledWandRectangle.midY), radius: downscaledWandRectangle.width / 2)
 
-        // get output image pixels in HSB format
+        // create the pixel buffer to render into
+        let pixelBufferWidth = Int(downscaledImage.extent.width.rounded(.down))
+        let pixelBufferHeight = Int(downscaledImage.extent.height.rounded(.down))
+        var pixelBufferOut: CVPixelBuffer?
+        let code = CVPixelBufferCreate(kCFAllocatorDefault, pixelBufferWidth, pixelBufferHeight, kCVPixelFormatType_32BGRA, nil, &pixelBufferOut)
+        guard let pixelBuffer = pixelBufferOut else {
+            throw WandDetectorError.couldNotCreatePixelBuffer(code: code)
+        }
+
+        // render to the pixel buffer using the working color space as the destination color space
+        let bounds = CGRect(x: 0, y: 0, width: pixelBufferWidth, height: pixelBufferHeight)
+        self.context.render(downscaledImage, to: pixelBuffer, bounds: bounds, colorSpace: self.context.workingColorSpace!)
+
+        // get pixels in HSB format
         var pixels = [(h: CGFloat, s: CGFloat, b: CGFloat, isWand: Bool)]()
-        outputImage.withPixelGetter({ getPixelAt in
-            let width = CVPixelBufferGetWidth(outputImage)
-            let height = CVPixelBufferGetHeight(outputImage)
-            let deadzoneRadius = transformedWand.radius * abs(deadzone)
+        pixelBuffer.withPixelGetter({ getPixelAt in
+            let deadzoneRadius = downscaledWand.radius * deadzone
 
-            for row in 0..<height {
-                for col in 0..<width {
+            for row in 0..<pixelBufferHeight {
+                for col in 0..<pixelBufferWidth {
                     let point: PixelPoint = (x: col, y: row)
                     guard let pixel = getPixelAt(point) else { continue }
 
                     // determine if wand pixel
-                    let distanceFromWandCenter = sqrt(pow(Double(point.x) - transformedWand.center.x, 2) + pow(Double(point.y) - transformedWand.center.y, 2))
-                    let isWand = distanceFromWandCenter <= transformedWand.radius
+                    let distanceFromWandCenter = sqrt(pow(CGFloat(point.x) - downscaledWand.center.x, 2) + pow(CGFloat(point.y) - downscaledWand.center.y, 2))
+                    let isWand = distanceFromWandCenter <= downscaledWand.radius
 
                     // verify pixel is not in the deadzone
                     guard isWand || distanceFromWandCenter > deadzoneRadius else { continue }
@@ -233,7 +172,11 @@ public struct WandDetector {
             }
         }, getting: UInt32.self)
 
-        assert(pixels.count > 0)
+        // verify there are wand pixels
+        var wandPixels = pixels.filter({ $0.isWand })
+        guard wandPixels.count > 0 else {
+            throw WandDetectorError.wandDoesNotContainPixels
+        }
 
         // find the arc on the hue circle with the greatest portion of the wand
         var wandfullArc = 0
@@ -243,10 +186,8 @@ public struct WandDetector {
         let halfRotation: CGFloat = 0.5 // 180 degrees
         let halfArcAngle: CGFloat = 30 / 360 // arcs are 60 degrees
         let arcRange = (halfRotation - halfArcAngle)...(halfRotation + halfArcAngle)
-
-        var wandPixels = pixels.filter({ $0.isWand })
         for arc in 0..<arcs {
-            let hueRotation = CGFloat(arc) * unitRotation // will rotate hue circle so degree 180 bisects the arc
+            let hueRotation = CGFloat(arc) * unitRotation // rotates hue circle so degree 180 bisects the arc
 
             let pixelsInArc = wandPixels.filter({ arcRange.contains($0.h.rotated(by: hueRotation)) }).count
             if pixelsInArc > greatestPixelsInAnArc {
@@ -258,8 +199,6 @@ public struct WandDetector {
         // rotate the hue values and filter for pixels that are in wandfullArc
         let hueRotation = CGFloat(wandfullArc) * unitRotation
         pixels = pixels.map({ ($0.h.rotated(by: hueRotation), $0.s, $0.b, $0.isWand) }).filter({ arcRange.contains($0.h) })
-
-        assert(pixels.count > 0)
 
         // create wandfull HSB ranges
         wandPixels = pixels.filter({ $0.isWand })
@@ -273,11 +212,8 @@ public struct WandDetector {
         // filter for pixels that are in wandfull HSB ranges
         pixels = pixels.filter({ wandfullHueRange.contains($0.h) && wandfullSaturationRange.contains($0.s) && wandfullBrightnessRange.contains($0.b) })
 
-        assert(pixels.count > 0)
-
         // get min wand activation pixel count
-        let clampedMinWA = self.minWA.clamped(to: 0.nextUp...1)
-        let minWAC = Int((Double(wandPixels.count) * clampedMinWA).rounded(.up))
+        let minWAC = Int((CGFloat(wandPixels.count) * minWA).rounded(.up))
 
         // create HSB range combinations where only one range is optimized
         var rangeCombos = [(score: Int, WAC: Int, hueRange: ClosedRange<CGFloat>, saturationRange: ClosedRange<CGFloat>, brightnessRange: ClosedRange<CGFloat>)]()
@@ -324,7 +260,7 @@ public struct WandDetector {
         }
 
         // get HSB ranges from the highest scoring range combo using WAC as a tie breaker
-        let bestRangeCombo = rangeCombos.max(by: { $0.score == $1.score ? $0.WAC < $1.WAC : $0.score < $1.score })!
+        let bestRangeCombo = rangeCombos.max(by: { $0.score != $1.score ? $0.score < $1.score : $0.WAC < $1.WAC })!
         let hueRange = bestRangeCombo.hueRange
         let saturationRange = bestRangeCombo.saturationRange
         let brightnessRange = bestRangeCombo.brightnessRange
@@ -364,10 +300,7 @@ public struct WandDetector {
                         saturationRange.contains(s) &&
                         brightnessRange.contains(b)) ? 1 : 0
 
-                    colorCube.append(texel) // red
-                    colorCube.append(texel) // green
-                    colorCube.append(texel) // blue
-                    colorCube.append(1)     // alpha
+                    colorCube += [texel, texel, texel, 1] // red, green, blue, alpha
                 }
             }
         }
@@ -384,20 +317,29 @@ public struct WandDetector {
 
     // MARK: Detection
 
-    public func detect(in image: CIImage, shouldContinueAfterDetecting: (Wand) -> Bool) throws -> CVImageBuffer {
-        // verify image extent is correct
-        guard image.extent.equalTo(self.imageRectangle) else {
-            throw WandDetectorError.invalidImage
+    public func detect(in image: CIImage, minWandRadius: CGFloat = 1, shouldContinueAfterDetecting: (Wand) -> Bool) throws {
+        // verify image origin is zero
+        let extent = image.extent
+        guard extent.origin == .zero else {
+            throw WandDetectorError.imageOriginIsNotZero
         }
 
-        // crop
-        let cropped = image.cropped(to: self.ROIRectangle)
+        // create the downscale transform and row stride
+        var transform = CGAffineTransform.identity
+        var minWandDiameter = CGFloat(abs(minWandRadius) * 2)
+        let greatestDimension = max(extent.width, extent.height)
+        if greatestDimension > CGFloat(self.maxDimension) {
+            let downscale = CGFloat(self.maxDimension) / greatestDimension
+            transform = CGAffineTransform(scaleX: downscale, y: downscale)
+            minWandDiameter = minWandDiameter * downscale
+        }
+        let rowStride = Int(minWandDiameter.rounded(.down)).clamped(to: 1...(.max))
 
-        // transform
-        let transformed = cropped.transformed(by: self.transform)
+        // downscale
+        let downscaled = image.transformed(by: transform)
 
         // range
-        self.rangeFilter.inputImage = transformed
+        self.rangeFilter.inputImage = downscaled
         let ranged = self.rangeFilter.outputImage
 
         // clamp
@@ -420,32 +362,32 @@ public struct WandDetector {
         let heightEroded = self.heightErosionFilter.outputImage
 
         // unwrap
-        guard let filtered = heightEroded else {
-            throw WandDetectorError.couldNotFilterImage
+        guard let filteredImage = heightEroded else {
+            throw WandDetectorError.couldNotApplyFilters
         }
 
-        // create the output image to render into
-        var outputImageOut: CVPixelBuffer?
-        let code = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, self.pool, &outputImageOut)
-        guard let outputImage = outputImageOut else {
-            throw WandDetectorError.couldNotCreateOutputImage(code: code)
+        // create the pixel buffer to render into
+        var pixelBufferOut: CVPixelBuffer?
+        let code = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, self.pool, &pixelBufferOut)
+        guard let pixelBuffer = pixelBufferOut else {
+            throw WandDetectorError.couldNotCreatePixelBuffer(code: code)
         }
 
-        // render to the output image
-        self.context.render(filtered, to: outputImage)
+        // render to the pixel buffer
+        let pixelBufferWidth = Int(downscaled.extent.width.rounded(.down))
+        let pixelBufferHeight = Int(downscaled.extent.height.rounded(.down))
+        let bounds = CGRect(x: 0, y: 0, width: pixelBufferWidth, height: pixelBufferHeight)
+        self.context.render(filteredImage, to: pixelBuffer, bounds: bounds, colorSpace: nil)
 
-        // use contour tracing to detect wands in the output image
-        outputImage.withPixelGetter({ getPixelAt in
-            let width = CVPixelBufferGetWidth(outputImage)
-            let height = CVPixelBufferGetHeight(outputImage)
-
+        // detect wands in the pixel buffer by contour tracing
+        pixelBuffer.withPixelGetter({ getPixelAt in
             ContourTracer.trace(
-                size: (width, height),
+                size: (pixelBufferWidth, pixelBufferHeight),
                 canTrace: {
                     guard let pixel = getPixelAt($0) else { return false }
                     return pixel >= 128 // 0.5 denormalized for UInt8
                 },
-                shouldScan: { $0 % self.rowStride == 0 },
+                shouldScan: { $0 % rowStride == 0 },
                 shouldContinueAfterTracing: {
                     let (_, (x, y), area) = $0
 
@@ -460,26 +402,25 @@ public struct WandDetector {
 
                     // make rectangle from wand
                     let diameter = radius * 2
-                    let wandRectangle = CGRect(origin: CGPoint(x: x - radius, y: y - radius), size: CGSize(width: diameter, height: diameter))
+                    let rectangle = CGRect(x: x - radius, y: y - radius, width: diameter, height: diameter)
 
-                    assert(wandRectangle.midX.rounded() == CGFloat(x).rounded() && wandRectangle.midY.rounded() == CGFloat(y).rounded(), "wandRectangle is centered incorrectly")
+                    // untransform the wand rectangle
+                    let untransformed = rectangle.applying(transform.inverted())
 
-                    // untransform the wand
-                    let untransformedWandRectangle = wandRectangle.applying(self.transform.inverted())
-                    let untransformedWand: Wand = (center: (x: Double(untransformedWandRectangle.midX), y: Double(untransformedWandRectangle.midY)), radius: Double(untransformedWandRectangle.width / 2))
+                    // create the wand
+                    let wand: Wand = (center: (x: untransformed.midX, y: untransformed.midY), radius: untransformed.width / 2)
 
-                    return shouldContinueAfterDetecting(untransformedWand)
-            })
+                    return shouldContinueAfterDetecting(wand)
+                }
+            )
 
         }, getting: UInt8.self)
-
-        return outputImage
     }
 }
 
 // MARK: Extensions
 
-fileprivate extension CVImageBuffer {
+fileprivate extension CVPixelBuffer {
     func withPixelGetter<T, R>(_ body: ((PixelPoint) -> T?) -> R, getting type: T.Type) -> R {
         assert(CVPixelBufferGetPlaneCount(self) == 0)
 
@@ -488,6 +429,9 @@ fileprivate extension CVImageBuffer {
         let height = CVPixelBufferGetHeight(self)
         let widthRange = 0..<width
         let heightRange = 0..<height
+
+        // get the vertical reflection
+        let reflection = CVImageBufferIsFlipped(self) ? height - 1 : 0
 
         // calculate row length
         let rowBytes = CVPixelBufferGetBytesPerRow(self)
@@ -505,7 +449,8 @@ fileprivate extension CVImageBuffer {
         // call body with a pixel getter function
         return body({ (x, y) in
             guard widthRange.contains(x) && heightRange.contains(y) else { return nil }
-            return pixels[(y * rowLength) + x]
+            let index = (abs(reflection - y) * rowLength) + x
+            return pixels[index]
         })
     }
 }
